@@ -7,3 +7,6 @@ qwen-finetuned
 venv/
 
 
+.jsonl
+train_data.jsonl
+train_data.json
