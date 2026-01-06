@@ -136,6 +136,13 @@
                 <input type="text" id="question" placeholder="What does the logger module do?" />
                 <p class="hint">Examples: "What is AuthService?", "How does the cache work?", "Explain the User model"</p>
             </div>
+            <div class="section" style="padding: 10px 15px;">
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                    <input type="checkbox" id="use-rag" checked style="width: 16px; height: 16px;" />
+                    <span>Use RAG (retrieve actual files)</span>
+                </label>
+                <p class="hint" style="margin-left: 26px;">Uncheck to use only trained/fine-tuned knowledge</p>
+            </div>
             <div class="btn-row">
                 <button class="btn" onclick="askQuestion()">Ask</button>
             </div>
@@ -154,6 +161,13 @@
             <div class="section">
                 <label>Error Message (optional):</label>
                 <input type="text" id="error" placeholder="TypeError: undefined is not a function" />
+            </div>
+            <div class="section" style="padding: 10px 15px;">
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                    <input type="checkbox" id="fix-use-rag" checked style="width: 16px; height: 16px;" />
+                    <span>Use RAG (search similar code in codebase)</span>
+                </label>
+                <p class="hint" style="margin-left: 26px;">Uncheck to use only trained/fine-tuned patterns</p>
             </div>
             <div class="btn-row">
                 <button class="btn" onclick="fixCode()">Get Fix</button>
@@ -200,24 +214,28 @@
 
         async function askQuestion() {
             const question = document.getElementById('question').value;
+            const useRag = document.getElementById('use-rag').checked;
             const output = document.getElementById('ask-output');
             const filesTag = document.getElementById('ask-files');
 
             if (!question.trim()) return alert('Enter a question');
 
-            output.innerHTML = '<div class="loading"><div class="spinner"></div>Thinking...</div>';
+            const mode = useRag ? 'Searching files...' : 'Using trained knowledge...';
+            output.innerHTML = `<div class="loading"><div class="spinner"></div>${mode}</div>`;
             filesTag.innerHTML = '';
 
             try {
                 const res = await fetch(`${API}/ask`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question })
+                    body: JSON.stringify({ question, use_rag: useRag })
                 });
                 const data = await res.json();
                 output.textContent = data.answer || 'No answer generated';
                 if (data.relevant_files?.length) {
                     filesTag.innerHTML = 'Used: ' + data.relevant_files.map(f => `<span>${f}</span>`).join('');
+                } else if (!useRag) {
+                    filesTag.innerHTML = '<span style="color:#9d4edd;">Trained knowledge only</span>';
                 }
             } catch (e) {
                 output.innerHTML = `<span class="error">Error: ${e.message}</span>`;
@@ -227,24 +245,28 @@
         async function fixCode() {
             const code = document.getElementById('code').value;
             const error = document.getElementById('error').value;
+            const useRag = document.getElementById('fix-use-rag').checked;
             const output = document.getElementById('fix-output');
             const filesTag = document.getElementById('fix-files');
 
             if (!code.trim()) return alert('Enter some code');
 
-            output.innerHTML = '<div class="loading"><div class="spinner"></div>Analyzing...</div>';
+            const mode = useRag ? 'Searching similar code...' : 'Using trained patterns...';
+            output.innerHTML = `<div class="loading"><div class="spinner"></div>${mode}</div>`;
             filesTag.innerHTML = '';
 
             try {
                 const res = await fetch(`${API}/fix`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code, error })
+                    body: JSON.stringify({ code, error, use_rag: useRag })
                 });
                 const data = await res.json();
                 output.textContent = data.suggestion || 'No suggestion generated';
                 if (data.relevant_files?.length) {
                     filesTag.innerHTML = 'Referenced: ' + data.relevant_files.map(f => `<span>${f}</span>`).join('');
+                } else if (!useRag) {
+                    filesTag.innerHTML = '<span style="color:#9d4edd;">Trained patterns only</span>';
                 }
             } catch (e) {
                 output.innerHTML = `<span class="error">Error: ${e.message}</span>`;

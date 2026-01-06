@@ -12,12 +12,14 @@ from codebase_index import CodebaseIndex
 class AskRequest(BaseModel):
     question: str
     max_new_tokens: int = 200
+    use_rag: bool = True  # Set False to use only trained knowledge
 
 
 class FixCodeRequest(BaseModel):
     code: str
     error: str = ""
     max_new_tokens: int = 200
+    use_rag: bool = True  # Set False to use only trained knowledge
 
 
 class AskResponse(BaseModel):
@@ -135,19 +137,28 @@ def generate(prompt: str, max_new_tokens: int) -> str:
 async def ask_about_codebase(request: AskRequest):
     """Ask a question about the codebase."""
 
-    # Search for relevant files
-    relevant = codebase.search(request.question, limit=2)
-    relevant_files = [r["filename"] for r in relevant]
+    relevant_files = []
 
-    # Build context from relevant files
-    context = ""
-    for r in relevant:
-        content_preview = r["content"][:1500]  # Limit content size
-        context += f"\n### {r['filename']}\n```\n{content_preview}\n```\n"
+    if request.use_rag:
+        # RAG mode: Search and include file contents
+        relevant = codebase.search(request.question, limit=2)
+        relevant_files = [r["filename"] for r in relevant]
 
-    # Create prompt
-    prompt = f"""Based on this codebase:
+        context = ""
+        for r in relevant:
+            content_preview = r["content"][:1500]
+            context += f"\n### {r['filename']}\n```\n{content_preview}\n```\n"
+
+        prompt = f"""Based on this codebase:
 {context}
+
+Question: {request.question}
+
+Answer:"""
+    else:
+        # Trained knowledge mode: Use only what model learned during fine-tuning
+        prompt = f"""You are a code assistant trained on a specific codebase.
+Answer based on your trained knowledge about the codebase patterns and conventions.
 
 Question: {request.question}
 
@@ -162,22 +173,35 @@ Answer:"""
 async def fix_code(request: FixCodeRequest):
     """Get fix suggestion for broken code."""
 
-    # Search for similar code patterns
-    search_query = request.code[:200] + " " + request.error
-    relevant = codebase.search(search_query, limit=2)
-    relevant_files = [r["filename"] for r in relevant]
-
-    # Build context
-    context = ""
-    for r in relevant:
-        content_preview = r["content"][:1000]
-        context += f"\n### {r['filename']} (reference)\n```\n{content_preview}\n```\n"
-
-    # Create prompt
+    relevant_files = []
     error_part = f"\nError: {request.error}" if request.error else ""
 
-    prompt = f"""Reference code from codebase:
+    if request.use_rag:
+        # RAG mode: Search for similar code patterns
+        search_query = request.code[:200] + " " + request.error
+        relevant = codebase.search(search_query, limit=2)
+        relevant_files = [r["filename"] for r in relevant]
+
+        context = ""
+        for r in relevant:
+            content_preview = r["content"][:1000]
+            context += f"\n### {r['filename']} (reference)\n```\n{content_preview}\n```\n"
+
+        prompt = f"""Reference code from codebase:
 {context}
+
+Broken code:
+```
+{request.code}
+```{error_part}
+
+Fixed code:
+```
+"""
+    else:
+        # Trained knowledge mode
+        prompt = f"""You are a code assistant trained on a specific codebase.
+Fix this code using the coding patterns and conventions you learned.
 
 Broken code:
 ```
