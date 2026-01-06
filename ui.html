@@ -138,11 +138,15 @@
                 <p class="hint">Examples: "What is AuthService?", "How does the cache work?", "Explain the User model"</p>
             </div>
             <div class="section" style="padding: 10px 15px;">
-                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0 0 8px 0; cursor: pointer;">
                     <input type="checkbox" id="use-rag" checked style="width: 16px; height: 16px;" />
                     <span>Use RAG (retrieve actual files)</span>
                 </label>
-                <p class="hint" style="margin-left: 26px;">Uncheck to use only trained/fine-tuned knowledge</p>
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                    <input type="checkbox" id="use-finetuned" checked style="width: 16px; height: 16px;" />
+                    <span>Use Fine-tuned Model</span>
+                </label>
+                <p class="hint" style="margin-left: 26px;">Uncheck to use base model only</p>
             </div>
             <div class="btn-row">
                 <button class="btn" onclick="askQuestion()">Ask</button>
@@ -164,11 +168,15 @@
                 <input type="text" id="error" placeholder="TypeError: undefined is not a function" />
             </div>
             <div class="section" style="padding: 10px 15px;">
-                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0 0 8px 0; cursor: pointer;">
                     <input type="checkbox" id="fix-use-rag" checked style="width: 16px; height: 16px;" />
                     <span>Use RAG (search similar code in codebase)</span>
                 </label>
-                <p class="hint" style="margin-left: 26px;">Uncheck to use only trained/fine-tuned patterns</p>
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                    <input type="checkbox" id="fix-use-finetuned" checked style="width: 16px; height: 16px;" />
+                    <span>Use Fine-tuned Model</span>
+                </label>
+                <p class="hint" style="margin-left: 26px;">Uncheck to use base model only</p>
             </div>
             <div class="btn-row">
                 <button class="btn" onclick="fixCode()">Get Fix</button>
@@ -194,9 +202,13 @@
                 <p class="hint">JSON array with test results containing fullError or complete_error with file:line:column</p>
             </div>
             <div class="section" style="padding: 10px 15px;">
-                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0 0 8px 0; cursor: pointer;">
                     <input type="checkbox" id="errors-use-rag" checked style="width: 16px; height: 16px;" />
                     <span>Use RAG (search related code in codebase)</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 10px; margin: 0; cursor: pointer;">
+                    <input type="checkbox" id="errors-use-finetuned" checked style="width: 16px; height: 16px;" />
+                    <span>Use Fine-tuned Model</span>
                 </label>
             </div>
             <div class="btn-row">
@@ -244,12 +256,14 @@
         async function askQuestion() {
             const question = document.getElementById('question').value;
             const useRag = document.getElementById('use-rag').checked;
+            const useFinetuned = document.getElementById('use-finetuned').checked;
             const output = document.getElementById('ask-output');
             const filesTag = document.getElementById('ask-files');
 
             if (!question.trim()) return alert('Enter a question');
 
-            const mode = useRag ? 'Searching files...' : 'Using trained knowledge...';
+            const modelType = useFinetuned ? 'fine-tuned' : 'base';
+            const mode = useRag ? `Searching files (${modelType})...` : `Using ${modelType} model...`;
             output.innerHTML = `<div class="loading"><div class="spinner"></div>${mode}</div>`;
             filesTag.innerHTML = '';
 
@@ -257,14 +271,15 @@
                 const res = await fetch(`${API}/ask`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question, use_rag: useRag })
+                    body: JSON.stringify({ question, use_rag: useRag, use_finetuned: useFinetuned })
                 });
                 const data = await res.json();
                 output.textContent = data.answer || 'No answer generated';
+                const modelBadge = `<span style="color:${useFinetuned ? '#00d9ff' : '#e94560'};">[${modelType}]</span>`;
                 if (data.relevant_files?.length) {
-                    filesTag.innerHTML = 'Used: ' + data.relevant_files.map(f => `<span>${f}</span>`).join('');
-                } else if (!useRag) {
-                    filesTag.innerHTML = '<span style="color:#9d4edd;">Trained knowledge only</span>';
+                    filesTag.innerHTML = modelBadge + ' Used: ' + data.relevant_files.map(f => `<span>${f}</span>`).join('');
+                } else {
+                    filesTag.innerHTML = modelBadge + (useRag ? '' : ' <span style="color:#9d4edd;">No RAG</span>');
                 }
             } catch (e) {
                 output.innerHTML = `<span class="error">Error: ${e.message}</span>`;
@@ -275,12 +290,14 @@
             const code = document.getElementById('code').value;
             const error = document.getElementById('error').value;
             const useRag = document.getElementById('fix-use-rag').checked;
+            const useFinetuned = document.getElementById('fix-use-finetuned').checked;
             const output = document.getElementById('fix-output');
             const filesTag = document.getElementById('fix-files');
 
             if (!code.trim()) return alert('Enter some code');
 
-            const mode = useRag ? 'Searching similar code...' : 'Using trained patterns...';
+            const modelType = useFinetuned ? 'fine-tuned' : 'base';
+            const mode = useRag ? `Searching similar code (${modelType})...` : `Using ${modelType} patterns...`;
             output.innerHTML = `<div class="loading"><div class="spinner"></div>${mode}</div>`;
             filesTag.innerHTML = '';
 
@@ -288,14 +305,15 @@
                 const res = await fetch(`${API}/fix`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code, error, use_rag: useRag })
+                    body: JSON.stringify({ code, error, use_rag: useRag, use_finetuned: useFinetuned })
                 });
                 const data = await res.json();
                 output.textContent = data.suggestion || 'No suggestion generated';
+                const modelBadge = `<span style="color:${useFinetuned ? '#00d9ff' : '#e94560'};">[${modelType}]</span>`;
                 if (data.relevant_files?.length) {
-                    filesTag.innerHTML = 'Referenced: ' + data.relevant_files.map(f => `<span>${f}</span>`).join('');
-                } else if (!useRag) {
-                    filesTag.innerHTML = '<span style="color:#9d4edd;">Trained patterns only</span>';
+                    filesTag.innerHTML = modelBadge + ' Referenced: ' + data.relevant_files.map(f => `<span>${f}</span>`).join('');
+                } else {
+                    filesTag.innerHTML = modelBadge + (useRag ? '' : ' <span style="color:#9d4edd;">No RAG</span>');
                 }
             } catch (e) {
                 output.innerHTML = `<span class="error">Error: ${e.message}</span>`;
@@ -305,6 +323,7 @@
         async function analyzeErrors() {
             const jsonInput = document.getElementById('json-input').value;
             const useRag = document.getElementById('errors-use-rag').checked;
+            const useFinetuned = document.getElementById('errors-use-finetuned').checked;
             const output = document.getElementById('errors-output');
 
             if (!jsonInput.trim()) {
@@ -319,13 +338,14 @@
                 return alert('Invalid JSON: ' + e.message);
             }
 
-            output.innerHTML = '<div class="loading"><div class="spinner"></div>Analyzing errors...</div>';
+            const modelType = useFinetuned ? 'fine-tuned' : 'base';
+            output.innerHTML = `<div class="loading"><div class="spinner"></div>Analyzing with ${modelType} model...</div>`;
 
             try {
                 const res = await fetch(`${API}/analyze-errors`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ errors, use_rag: useRag })
+                    body: JSON.stringify({ errors, use_rag: useRag, use_finetuned: useFinetuned })
                 });
                 const data = await res.json();
 
@@ -368,11 +388,13 @@
         async function loadJsonFile() {
             const output = document.getElementById('errors-output');
             const useRag = document.getElementById('errors-use-rag').checked;
+            const useFinetuned = document.getElementById('errors-use-finetuned').checked;
 
-            output.innerHTML = '<div class="loading"><div class="spinner"></div>Loading and analyzing...</div>';
+            const modelType = useFinetuned ? 'fine-tuned' : 'base';
+            output.innerHTML = `<div class="loading"><div class="spinner"></div>Loading and analyzing with ${modelType} model...</div>`;
 
             try {
-                const res = await fetch(`${API}/analyze-json-file?file_path=./json_result.json&use_rag=${useRag}`, {
+                const res = await fetch(`${API}/analyze-json-file?file_path=./json_result.json&use_rag=${useRag}&use_finetuned=${useFinetuned}`, {
                     method: 'POST'
                 });
                 const data = await res.json();

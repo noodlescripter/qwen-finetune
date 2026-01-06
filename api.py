@@ -14,6 +14,7 @@ class AskRequest(BaseModel):
     question: str
     max_new_tokens: int = 200
     use_rag: bool = True  # Set False to use only trained knowledge
+    use_finetuned: bool = True  # Set False to use base model
 
 
 class FixCodeRequest(BaseModel):
@@ -21,6 +22,7 @@ class FixCodeRequest(BaseModel):
     error: str = ""
     max_new_tokens: int = 200
     use_rag: bool = True  # Set False to use only trained knowledge
+    use_finetuned: bool = True  # Set False to use base model
 
 
 class AskResponse(BaseModel):
@@ -52,6 +54,7 @@ class TestError(BaseModel):
 class AnalyzeErrorsRequest(BaseModel):
     errors: list[TestError]
     use_rag: bool = True
+    use_finetuned: bool = True
     max_new_tokens: int = 300
 
 
@@ -69,7 +72,8 @@ class AnalyzeErrorsResponse(BaseModel):
 
 
 # Global variables
-model = None
+base_model = None
+finetuned_model = None
 tokenizer = None
 codebase = CodebaseIndex()
 error_parser = ErrorParser(base_path="./data")
@@ -77,7 +81,7 @@ error_parser = ErrorParser(base_path="./data")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, tokenizer
+    global base_model, finetuned_model, tokenizer
 
     base_model_name = "Qwen/Qwen2.5-Coder-0.5B"
     adapter_path = "./qwen-finetuned"
@@ -93,7 +97,7 @@ async def lifespan(app: FastAPI):
         bnb_4bit_use_double_quant=True,
     )
 
-    print("Loading model...")
+    print("Loading base model...")
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
         trust_remote_code=True,
@@ -104,11 +108,17 @@ async def lifespan(app: FastAPI):
     # Load fine-tuned adapter if exists
     import os
     if os.path.exists(adapter_path):
-        print("Loading fine-tuned adapter...")
-        model = PeftModel.from_pretrained(base_model, adapter_path)
+        print("Loading fine-tuned model...")
+        finetuned_base = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            trust_remote_code=True,
+            quantization_config=bnb_config,
+            device_map="auto",
+        )
+        finetuned_model = PeftModel.from_pretrained(finetuned_base, adapter_path)
     else:
-        print("No fine-tuned adapter found, using base model")
-        model = base_model
+        print("No fine-tuned adapter found, finetuned_model = base_model")
+        finetuned_model = base_model
 
     # Load codebase index
     print("Loading codebase index...")
@@ -133,8 +143,14 @@ app.add_middleware(
 )
 
 
-def generate(prompt: str, max_new_tokens: int) -> str:
+def get_model(use_finetuned: bool = True):
+    """Get the appropriate model based on preference."""
+    return finetuned_model if use_finetuned else base_model
+
+
+def generate(prompt: str, max_new_tokens: int, use_finetuned: bool = True) -> str:
     """Generate response from model."""
+    model = get_model(use_finetuned)
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     outputs = model.generate(
@@ -194,7 +210,7 @@ Question: {request.question}
 
 Answer:"""
 
-    answer = generate(prompt, request.max_new_tokens)
+    answer = generate(prompt, request.max_new_tokens, request.use_finetuned)
 
     return AskResponse(answer=answer, relevant_files=relevant_files)
 
@@ -242,7 +258,7 @@ Fixed code:
 ```
 """
 
-    suggestion = generate(prompt, request.max_new_tokens)
+    suggestion = generate(prompt, request.max_new_tokens, request.use_finetuned)
 
     # Clean up code block markers
     suggestion = suggestion.replace("```", "").strip()
@@ -312,7 +328,7 @@ Test failure details:
 Provide a concise fix suggestion:"""
 
         # Generate suggestion
-        suggestion = generate(prompt, request.max_new_tokens)
+        suggestion = generate(prompt, request.max_new_tokens, request.use_finetuned)
 
         # Build location info
         locations = [
@@ -340,7 +356,7 @@ Provide a concise fix suggestion:"""
 
 
 @app.post("/analyze-json-file")
-async def analyze_json_file(file_path: str = "./json_result.json", use_rag: bool = True):
+async def analyze_json_file(file_path: str = "./json_result.json", use_rag: bool = True, use_finetuned: bool = True):
     """Analyze errors from a JSON file path."""
     import os
 
@@ -361,7 +377,7 @@ async def analyze_json_file(file_path: str = "./json_result.json", use_rag: bool
             for p in parsed_errors
         ]
 
-        request = AnalyzeErrorsRequest(errors=errors, use_rag=use_rag)
+        request = AnalyzeErrorsRequest(errors=errors, use_rag=use_rag, use_finetuned=use_finetuned)
         return await analyze_test_errors(request)
 
     except Exception as e:
@@ -400,4 +416,8 @@ async def health():
     return {
         "status": "ok",
         "files_indexed": len(codebase.files),
+        "models": {
+            "base": base_model is not None,
+            "finetuned": finetuned_model is not None and finetuned_model is not base_model,
+        }
     }
