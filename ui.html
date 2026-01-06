@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen Code Assistant</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #00d9ff;
+        }
+
+        .input-section {
+            background: #16213e;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .input-section label {
+            display: block;
+            margin-bottom: 8px;
+            color: #00d9ff;
+            font-weight: 500;
+        }
+
+        textarea {
+            width: 100%;
+            height: 150px;
+            background: #0f0f23;
+            border: 1px solid #333;
+            border-radius: 8px;
+            color: #eee;
+            padding: 15px;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 14px;
+            resize: vertical;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .controls label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #aaa;
+        }
+
+        select, input[type="number"] {
+            background: #0f0f23;
+            border: 1px solid #333;
+            border-radius: 5px;
+            color: #eee;
+            padding: 8px 12px;
+            font-size: 14px;
+        }
+
+        select:focus, input[type="number"]:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+
+        .btn {
+            background: #00d9ff;
+            color: #1a1a2e;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn:hover {
+            background: #00b8d9;
+            transform: translateY(-2px);
+        }
+
+        .btn:disabled {
+            background: #555;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-compare {
+            background: #9d4edd;
+        }
+
+        .btn-compare:hover {
+            background: #7b2cbf;
+        }
+
+        .output-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .output-section.single {
+            grid-template-columns: 1fr;
+        }
+
+        .output-box {
+            background: #16213e;
+            border-radius: 10px;
+            padding: 20px;
+        }
+
+        .output-box h3 {
+            color: #00d9ff;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .output-box h3 .badge {
+            font-size: 12px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            background: #333;
+        }
+
+        .output-box h3 .badge.base {
+            background: #e94560;
+        }
+
+        .output-box h3 .badge.finetuned {
+            background: #00d9ff;
+            color: #1a1a2e;
+        }
+
+        .output-content {
+            background: #0f0f23;
+            border-radius: 8px;
+            padding: 15px;
+            min-height: 200px;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 14px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-x: auto;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #aaa;
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #333;
+            border-top-color: #00d9ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error {
+            color: #e94560;
+            background: rgba(233, 69, 96, 0.1);
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+        }
+
+        .status.connected {
+            background: rgba(0, 217, 255, 0.1);
+            color: #00d9ff;
+        }
+
+        .status.disconnected {
+            background: rgba(233, 69, 96, 0.1);
+            color: #e94560;
+        }
+
+        @media (max-width: 768px) {
+            .output-section {
+                grid-template-columns: 1fr;
+            }
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Qwen Code Assistant</h1>
+
+        <div id="status" class="status disconnected">Checking API connection...</div>
+
+        <div class="input-section">
+            <label for="prompt">Enter your code prompt:</label>
+            <textarea id="prompt" placeholder="def calculate_sum(numbers):"></textarea>
+
+            <div class="controls">
+                <label>
+                    Model:
+                    <select id="model">
+                        <option value="finetuned">Fine-tuned</option>
+                        <option value="base">Base</option>
+                        <option value="compare">Compare Both</option>
+                    </select>
+                </label>
+
+                <label>
+                    Max Tokens:
+                    <input type="number" id="maxTokens" value="100" min="10" max="500" step="10">
+                </label>
+
+                <button class="btn" id="generateBtn" onclick="generate()">Generate</button>
+            </div>
+        </div>
+
+        <div id="outputSection" class="output-section single">
+            <div class="output-box">
+                <h3>Output <span class="badge finetuned" id="outputBadge">Fine-tuned</span></h3>
+                <div class="output-content" id="output">Generated code will appear here...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8000';
+
+        async function checkHealth() {
+            const status = document.getElementById('status');
+            try {
+                const response = await fetch(`${API_URL}/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    status.className = 'status connected';
+                    status.textContent = `Connected - Models: ${data.models.join(', ')}`;
+                } else {
+                    throw new Error('API not responding');
+                }
+            } catch (error) {
+                status.className = 'status disconnected';
+                status.textContent = 'Disconnected - Start the API server: uvicorn api:app --port 8000';
+            }
+        }
+
+        function updateOutputLayout(mode) {
+            const outputSection = document.getElementById('outputSection');
+
+            if (mode === 'compare') {
+                outputSection.className = 'output-section';
+                outputSection.innerHTML = `
+                    <div class="output-box">
+                        <h3>Base Model <span class="badge base">Base</span></h3>
+                        <div class="output-content" id="baseOutput">Waiting for generation...</div>
+                    </div>
+                    <div class="output-box">
+                        <h3>Fine-tuned Model <span class="badge finetuned">Fine-tuned</span></h3>
+                        <div class="output-content" id="finetunedOutput">Waiting for generation...</div>
+                    </div>
+                `;
+            } else {
+                outputSection.className = 'output-section single';
+                const badgeClass = mode === 'base' ? 'base' : 'finetuned';
+                const badgeText = mode === 'base' ? 'Base' : 'Fine-tuned';
+                outputSection.innerHTML = `
+                    <div class="output-box">
+                        <h3>Output <span class="badge ${badgeClass}" id="outputBadge">${badgeText}</span></h3>
+                        <div class="output-content" id="output">Generated code will appear here...</div>
+                    </div>
+                `;
+            }
+        }
+
+        document.getElementById('model').addEventListener('change', (e) => {
+            updateOutputLayout(e.target.value);
+        });
+
+        async function generate() {
+            const prompt = document.getElementById('prompt').value;
+            const model = document.getElementById('model').value;
+            const maxTokens = parseInt(document.getElementById('maxTokens').value);
+            const btn = document.getElementById('generateBtn');
+
+            if (!prompt.trim()) {
+                alert('Please enter a prompt');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Generating...';
+
+            const requestBody = {
+                prompt: prompt,
+                max_new_tokens: maxTokens
+            };
+
+            try {
+                if (model === 'compare') {
+                    document.getElementById('baseOutput').innerHTML = '<div class="loading"><div class="spinner"></div>Generating...</div>';
+                    document.getElementById('finetunedOutput').innerHTML = '<div class="loading"><div class="spinner"></div>Generating...</div>';
+
+                    const response = await fetch(`${API_URL}/compare`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    });
+
+                    if (!response.ok) throw new Error('API request failed');
+
+                    const data = await response.json();
+                    document.getElementById('baseOutput').textContent = data.base_output;
+                    document.getElementById('finetunedOutput').textContent = data.finetuned_output;
+                } else {
+                    const output = document.getElementById('output');
+                    output.innerHTML = '<div class="loading"><div class="spinner"></div>Generating...</div>';
+
+                    const endpoint = model === 'base' ? '/generate/base' : '/generate/finetuned';
+                    const response = await fetch(`${API_URL}${endpoint}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    });
+
+                    if (!response.ok) throw new Error('API request failed');
+
+                    const data = await response.json();
+                    output.textContent = data.generated_text;
+                }
+            } catch (error) {
+                const errorHtml = `<div class="error">Error: ${error.message}. Make sure the API is running.</div>`;
+                if (model === 'compare') {
+                    document.getElementById('baseOutput').innerHTML = errorHtml;
+                    document.getElementById('finetunedOutput').innerHTML = errorHtml;
+                } else {
+                    document.getElementById('output').innerHTML = errorHtml;
+                }
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Generate';
+            }
+        }
+
+        // Allow Ctrl+Enter to generate
+        document.getElementById('prompt').addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                generate();
+            }
+        });
+
+        // Check API health on load
+        checkHealth();
+        setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>
