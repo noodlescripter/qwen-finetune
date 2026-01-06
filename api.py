@@ -5,49 +5,55 @@ from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 import torch
+from codebase_index import CodebaseIndex
 
 
-class GenerateRequest(BaseModel):
-    prompt: str
-    max_new_tokens: int = 100
+# Request/Response models
+class AskRequest(BaseModel):
+    question: str
+    max_new_tokens: int = 200
 
 
 class FixCodeRequest(BaseModel):
     code: str
     error: str = ""
-    max_new_tokens: int = 150
+    max_new_tokens: int = 200
 
 
-class GenerateResponse(BaseModel):
-    generated_text: str
+class AskResponse(BaseModel):
+    answer: str
+    relevant_files: list[str]
 
 
 class FixCodeResponse(BaseModel):
     suggestion: str
+    relevant_files: list[str]
 
 
-class CompareResponse(BaseModel):
-    base_output: str
-    finetuned_output: str
+class FileInfo(BaseModel):
+    filename: str
+    path: str
+    summary: str
+    lines: int
 
 
-# Global variables for models
-base_model = None
-finetuned_model = None
+# Global variables
+model = None
 tokenizer = None
+codebase = CodebaseIndex()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global base_model, finetuned_model, tokenizer
+    global model, tokenizer
 
     base_model_name = "Qwen/Qwen2.5-Coder-0.5B"
     adapter_path = "./qwen-finetuned"
 
-    print(f"Loading tokenizer: {base_model_name}")
+    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
 
-    # 4-bit quantization config
+    # 4-bit quantization
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -55,8 +61,7 @@ async def lifespan(app: FastAPI):
         bnb_4bit_use_double_quant=True,
     )
 
-    # Load base model
-    print("Loading base model...")
+    print("Loading model...")
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
         trust_remote_code=True,
@@ -64,24 +69,29 @@ async def lifespan(app: FastAPI):
         device_map="auto",
     )
 
-    # Load fine-tuned model (base + LoRA adapter)
-    print("Loading fine-tuned model...")
-    finetuned_base = AutoModelForCausalLM.from_pretrained(
-        base_model_name,
-        trust_remote_code=True,
-        quantization_config=bnb_config,
-        device_map="auto",
-    )
-    finetuned_model = PeftModel.from_pretrained(finetuned_base, adapter_path)
+    # Load fine-tuned adapter if exists
+    import os
+    if os.path.exists(adapter_path):
+        print("Loading fine-tuned adapter...")
+        model = PeftModel.from_pretrained(base_model, adapter_path)
+    else:
+        print("No fine-tuned adapter found, using base model")
+        model = base_model
 
-    print("All models loaded successfully!")
+    # Load codebase index
+    print("Loading codebase index...")
+    codebase.load_index()
+    if not codebase.files:
+        print("No index found, indexing codebase...")
+        codebase.index_codebase()
+
+    print(f"Ready! {len(codebase.files)} files indexed.")
     yield
     print("Shutting down...")
 
 
-app = FastAPI(title="Qwen API", lifespan=lifespan)
+app = FastAPI(title="Qwen Code Assistant API", lifespan=lifespan)
 
-# Enable CORS for UI
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -91,104 +101,131 @@ app.add_middleware(
 )
 
 
-def generate_text(model, prompt: str, max_new_tokens: int) -> str:
-    """Basic text generation."""
+def generate(prompt: str, max_new_tokens: int) -> str:
+    """Generate response from model."""
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     outputs = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
         do_sample=True,
-        temperature=0.4,
+        temperature=0.3,
         top_p=0.9,
-        top_k=40,
+        top_k=30,
         repetition_penalty=1.2,
         pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
     )
 
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return generated_text
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
+    # Extract only the generated part after the prompt
+    if prompt in response:
+        response = response[len(prompt):].strip()
 
-def fix_code(model, code: str, error: str, max_new_tokens: int) -> str:
-    """Generate a fix suggestion for broken code."""
-
-    # Create a focused prompt
-    if error:
-        prompt = f'''# Broken code:
-{code}
-
-# Error: {error}
-
-# Fixed code:
-'''
-    else:
-        prompt = f'''# Code to fix:
-{code}
-
-# Fixed code:
-'''
-
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,  # Deterministic for fixes
-        temperature=0.2,
-        top_k=20,
-        repetition_penalty=1.2,
-        pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-    )
-
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    # Extract only the fixed code part
-    if "# Fixed code:" in generated_text:
-        suggestion = generated_text.split("# Fixed code:")[-1].strip()
-    else:
-        suggestion = generated_text[len(prompt):].strip()
-
-    # Clean up - stop at common ending patterns
-    stop_patterns = ["\n\n#", "\n# Error", "\n# Broken", "\n# Code to"]
+    # Clean up
+    stop_patterns = ["\n\n\n", "Question:", "Code:", "# ---"]
     for pattern in stop_patterns:
-        if pattern in suggestion:
-            suggestion = suggestion[:suggestion.find(pattern)].strip()
+        if pattern in response:
+            response = response[:response.find(pattern)].strip()
 
-    return suggestion
-
-
-@app.post("/generate/base", response_model=GenerateResponse)
-async def generate_base(request: GenerateRequest):
-    """Generate using the base Qwen model."""
-    generated_text = generate_text(base_model, request.prompt, request.max_new_tokens)
-    return GenerateResponse(generated_text=generated_text)
+    return response
 
 
-@app.post("/generate/finetuned", response_model=GenerateResponse)
-async def generate_finetuned(request: GenerateRequest):
-    """Generate using the fine-tuned model."""
-    generated_text = generate_text(finetuned_model, request.prompt, request.max_new_tokens)
-    return GenerateResponse(generated_text=generated_text)
+@app.post("/ask", response_model=AskResponse)
+async def ask_about_codebase(request: AskRequest):
+    """Ask a question about the codebase."""
 
+    # Search for relevant files
+    relevant = codebase.search(request.question, limit=2)
+    relevant_files = [r["filename"] for r in relevant]
 
-@app.post("/compare", response_model=CompareResponse)
-async def compare(request: GenerateRequest):
-    """Compare outputs from both models."""
-    base_output = generate_text(base_model, request.prompt, request.max_new_tokens)
-    finetuned_output = generate_text(finetuned_model, request.prompt, request.max_new_tokens)
-    return CompareResponse(base_output=base_output, finetuned_output=finetuned_output)
+    # Build context from relevant files
+    context = ""
+    for r in relevant:
+        content_preview = r["content"][:1500]  # Limit content size
+        context += f"\n### {r['filename']}\n```\n{content_preview}\n```\n"
+
+    # Create prompt
+    prompt = f"""Based on this codebase:
+{context}
+
+Question: {request.question}
+
+Answer:"""
+
+    answer = generate(prompt, request.max_new_tokens)
+
+    return AskResponse(answer=answer, relevant_files=relevant_files)
 
 
 @app.post("/fix", response_model=FixCodeResponse)
-async def fix_broken_code(request: FixCodeRequest):
-    """Get a fix suggestion for broken code."""
-    suggestion = fix_code(finetuned_model, request.code, request.error, request.max_new_tokens)
-    return FixCodeResponse(suggestion=suggestion)
+async def fix_code(request: FixCodeRequest):
+    """Get fix suggestion for broken code."""
+
+    # Search for similar code patterns
+    search_query = request.code[:200] + " " + request.error
+    relevant = codebase.search(search_query, limit=2)
+    relevant_files = [r["filename"] for r in relevant]
+
+    # Build context
+    context = ""
+    for r in relevant:
+        content_preview = r["content"][:1000]
+        context += f"\n### {r['filename']} (reference)\n```\n{content_preview}\n```\n"
+
+    # Create prompt
+    error_part = f"\nError: {request.error}" if request.error else ""
+
+    prompt = f"""Reference code from codebase:
+{context}
+
+Broken code:
+```
+{request.code}
+```{error_part}
+
+Fixed code:
+```
+"""
+
+    suggestion = generate(prompt, request.max_new_tokens)
+
+    # Clean up code block markers
+    suggestion = suggestion.replace("```", "").strip()
+
+    return FixCodeResponse(suggestion=suggestion, relevant_files=relevant_files)
+
+
+@app.get("/files", response_model=list[FileInfo])
+async def list_files():
+    """List all indexed files."""
+    return codebase.list_files()
+
+
+@app.get("/file/{filename}")
+async def get_file(filename: str):
+    """Get content of a specific file."""
+    file_data = codebase.get_file(filename)
+    if file_data:
+        return {
+            "filename": filename,
+            "path": file_data["path"],
+            "summary": file_data["summary"],
+            "content": file_data["content"],
+        }
+    return {"error": "File not found"}
+
+
+@app.post("/reindex")
+async def reindex_codebase():
+    """Re-index the codebase."""
+    count = codebase.index_codebase()
+    return {"message": f"Indexed {count} files"}
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "models": ["base", "finetuned"]}
+    return {
+        "status": "ok",
+        "files_indexed": len(codebase.files),
+    }

@@ -1,0 +1,72 @@
+{
+  "main.py": {
+    "path": "main.py",
+    "summary": "Main application entry point.",
+    "lines": 81
+  },
+  "config.py": {
+    "path": "config.py",
+    "summary": "Application configuration settings.",
+    "lines": 75
+  },
+  "user.py": {
+    "path": "models/user.py",
+    "summary": "User model and related operations.",
+    "lines": 105
+  },
+  "database.py": {
+    "path": "utils/database.py",
+    "summary": "Database connection and query utilities.",
+    "lines": 64
+  },
+  "logger.py": {
+    "path": "utils/logger.py",
+    "summary": "Custom logging utility for our application.",
+    "lines": 44
+  },
+  "auth.py": {
+    "path": "services/auth.py",
+    "summary": "Authentication service for handling user login and sessions.",
+    "lines": 110
+  },
+  "api.js": {
+    "path": "routes/api.js",
+    "summary": "API route handlers.",
+    "lines": 206
+  },
+  "validator.js": {
+    "path": "utils/validator.js",
+    "summary": "Validation utilities for common data types.",
+    "lines": 173
+  },
+  "cache.js": {
+    "path": "services/cache.js",
+    "summary": "In-memory cache service with TTL support.",
+    "lines": 201
+  },
+  "config.ts": {
+    "path": "config.ts",
+    "summary": "Application configuration management.",
+    "lines": 127
+  },
+  "user.ts": {
+    "path": "models/user.ts",
+    "summary": "User model and related operations.",
+    "lines": 149
+  },
+  "http-client.ts": {
+    "path": "utils/http-client.ts",
+    "summary": "HTTP client utility with retry and timeout support.",
+    "lines": 124
+  },
+  "logger.ts": {
+    "path": "utils/logger.ts",
+    "summary": "Custom logging utility for the application.",
+    "lines": 100
+  },
+  "auth.ts": {
+    "path": "services/auth.ts",
+    "summary": "Authentication service for handling user login and sessions.",
+    "lines": 198
+  }
+}
