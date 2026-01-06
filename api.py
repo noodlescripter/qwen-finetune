@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import PeftModel
 import torch
 from codebase_index import CodebaseIndex
+from error_parser import ErrorParser, ParsedError
 
 
 # Request/Response models
@@ -39,10 +40,39 @@ class FileInfo(BaseModel):
     lines: int
 
 
+class TestError(BaseModel):
+    title: str
+    state: str = "failed"
+    duration: int = 0
+    error: str = ""
+    fullError: str = ""
+    complete_error: str = ""
+
+
+class AnalyzeErrorsRequest(BaseModel):
+    errors: list[TestError]
+    use_rag: bool = True
+    max_new_tokens: int = 300
+
+
+class ErrorAnalysis(BaseModel):
+    title: str
+    error_message: str
+    locations: list[dict]
+    suggestion: str
+
+
+class AnalyzeErrorsResponse(BaseModel):
+    results: list[ErrorAnalysis]
+    total_errors: int
+    analyzed: int
+
+
 # Global variables
 model = None
 tokenizer = None
 codebase = CodebaseIndex()
+error_parser = ErrorParser(base_path="./data")
 
 
 @asynccontextmanager
@@ -218,6 +248,124 @@ Fixed code:
     suggestion = suggestion.replace("```", "").strip()
 
     return FixCodeResponse(suggestion=suggestion, relevant_files=relevant_files)
+
+
+@app.post("/analyze-errors", response_model=AnalyzeErrorsResponse)
+async def analyze_test_errors(request: AnalyzeErrorsRequest):
+    """Analyze test errors and provide fix suggestions."""
+
+    results = []
+
+    # Convert request errors to dict format for parser
+    error_dicts = [
+        {
+            "title": e.title,
+            "state": e.state,
+            "error": e.error,
+            "fullError": e.fullError,
+            "complete_error": e.complete_error,
+        }
+        for e in request.errors
+    ]
+
+    # Parse all errors
+    parsed_errors = error_parser.parse_json_data(error_dicts)
+
+    for parsed in parsed_errors:
+        # Skip passed tests
+        if parsed.state != "failed":
+            continue
+
+        # Format error info for AI
+        error_info = error_parser.format_for_ai(parsed)
+
+        # Build context from RAG if enabled
+        context = ""
+        if request.use_rag and parsed.locations:
+            # Get related files from codebase
+            search_terms = parsed.error_message + " " + " ".join(
+                loc.file_path for loc in parsed.locations[:2]
+            )
+            relevant = codebase.search(search_terms, limit=2)
+
+            for r in relevant:
+                content_preview = r["content"][:800]
+                context += f"\n### {r['filename']} (reference)\n```\n{content_preview}\n```\n"
+
+        # Build prompt
+        if context:
+            prompt = f"""You are a code assistant. Analyze this test failure and suggest a fix.
+
+Reference code from codebase:
+{context}
+
+Test failure details:
+{error_info}
+
+Provide a concise fix suggestion:"""
+        else:
+            prompt = f"""You are a code assistant. Analyze this test failure and suggest a fix.
+
+Test failure details:
+{error_info}
+
+Provide a concise fix suggestion:"""
+
+        # Generate suggestion
+        suggestion = generate(prompt, request.max_new_tokens)
+
+        # Build location info
+        locations = [
+            {
+                "file": loc.file_path,
+                "line": loc.line_number,
+                "column": loc.column,
+                "code": loc.code_snippet,
+            }
+            for loc in parsed.locations
+        ]
+
+        results.append(ErrorAnalysis(
+            title=parsed.title,
+            error_message=parsed.error_message,
+            locations=locations,
+            suggestion=suggestion
+        ))
+
+    return AnalyzeErrorsResponse(
+        results=results,
+        total_errors=len(request.errors),
+        analyzed=len(results)
+    )
+
+
+@app.post("/analyze-json-file")
+async def analyze_json_file(file_path: str = "./json_result.json", use_rag: bool = True):
+    """Analyze errors from a JSON file path."""
+    import os
+
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+
+    try:
+        parsed_errors = error_parser.parse_json_file(file_path)
+
+        # Convert to request format and reuse the analyze endpoint
+        errors = [
+            TestError(
+                title=p.title,
+                state=p.state,
+                error=p.error_message,
+                fullError=p.full_error,
+            )
+            for p in parsed_errors
+        ]
+
+        request = AnalyzeErrorsRequest(errors=errors, use_rag=use_rag)
+        return await analyze_test_errors(request)
+
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/files", response_model=list[FileInfo])

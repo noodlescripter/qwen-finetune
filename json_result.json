@@ -1,0 +1,10 @@
+[
+    {
+        "title": "some_test_case",
+        "state": "failed",
+        "duration": 12345,
+        "error": "error thrown",
+        "fullError": "{stack: at some files.js:1:1}",
+        "complete_error": "some complete error"
+    }
+]
