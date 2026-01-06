@@ -12,8 +12,18 @@ class GenerateRequest(BaseModel):
     max_new_tokens: int = 100
 
 
+class FixCodeRequest(BaseModel):
+    code: str
+    error: str = ""
+    max_new_tokens: int = 150
+
+
 class GenerateResponse(BaseModel):
     generated_text: str
+
+
+class FixCodeResponse(BaseModel):
+    suggestion: str
 
 
 class CompareResponse(BaseModel):
@@ -82,50 +92,72 @@ app.add_middleware(
 
 
 def generate_text(model, prompt: str, max_new_tokens: int) -> str:
+    """Basic text generation."""
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-    # Stop sequences to prevent hallucination
-    stop_strings = [
-        "\n\n\n",
-        "Output:",
-        "Error:",
-        "Traceback",
-        '"""',
-        "I am getting",
-        "The above exception",
-        "# File:",
-    ]
-
-    # Encode stop sequences
-    stop_token_ids = []
-    for stop_str in stop_strings:
-        tokens = tokenizer.encode(stop_str, add_special_tokens=False)
-        if tokens:
-            stop_token_ids.append(tokens[0])
 
     outputs = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
         do_sample=True,
-        temperature=0.7,
+        temperature=0.4,
         top_p=0.9,
-        top_k=50,
-        repetition_penalty=1.1,
+        top_k=40,
+        repetition_penalty=1.2,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return generated_text
+
+
+def fix_code(model, code: str, error: str, max_new_tokens: int) -> str:
+    """Generate a fix suggestion for broken code."""
+
+    # Create a focused prompt
+    if error:
+        prompt = f'''# Broken code:
+{code}
+
+# Error: {error}
+
+# Fixed code:
+'''
+    else:
+        prompt = f'''# Code to fix:
+{code}
+
+# Fixed code:
+'''
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,  # Deterministic for fixes
+        temperature=0.2,
+        top_k=20,
+        repetition_penalty=1.2,
         pad_token_id=tokenizer.eos_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
 
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    # Post-process: cut at stop sequences
-    for stop_str in stop_strings:
-        if stop_str in generated_text:
-            idx = generated_text.find(stop_str)
-            # Keep the prompt part, cut at stop sequence
-            if idx > len(prompt):
-                generated_text = generated_text[:idx].rstrip()
+    # Extract only the fixed code part
+    if "# Fixed code:" in generated_text:
+        suggestion = generated_text.split("# Fixed code:")[-1].strip()
+    else:
+        suggestion = generated_text[len(prompt):].strip()
 
-    return generated_text
+    # Clean up - stop at common ending patterns
+    stop_patterns = ["\n\n#", "\n# Error", "\n# Broken", "\n# Code to"]
+    for pattern in stop_patterns:
+        if pattern in suggestion:
+            suggestion = suggestion[:suggestion.find(pattern)].strip()
+
+    return suggestion
 
 
 @app.post("/generate/base", response_model=GenerateResponse)
@@ -148,6 +180,13 @@ async def compare(request: GenerateRequest):
     base_output = generate_text(base_model, request.prompt, request.max_new_tokens)
     finetuned_output = generate_text(finetuned_model, request.prompt, request.max_new_tokens)
     return CompareResponse(base_output=base_output, finetuned_output=finetuned_output)
+
+
+@app.post("/fix", response_model=FixCodeResponse)
+async def fix_broken_code(request: FixCodeRequest):
+    """Get a fix suggestion for broken code."""
+    suggestion = fix_code(finetuned_model, request.code, request.error, request.max_new_tokens)
+    return FixCodeResponse(suggestion=suggestion)
 
 
 @app.get("/health")
