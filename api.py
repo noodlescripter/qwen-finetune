@@ -83,15 +83,49 @@ app.add_middleware(
 
 def generate_text(model, prompt: str, max_new_tokens: int) -> str:
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    # Stop sequences to prevent hallucination
+    stop_strings = [
+        "\n\n\n",
+        "Output:",
+        "Error:",
+        "Traceback",
+        '"""',
+        "I am getting",
+        "The above exception",
+        "# File:",
+    ]
+
+    # Encode stop sequences
+    stop_token_ids = []
+    for stop_str in stop_strings:
+        tokens = tokenizer.encode(stop_str, add_special_tokens=False)
+        if tokens:
+            stop_token_ids.append(tokens[0])
+
     outputs = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
         do_sample=True,
         temperature=0.7,
         top_p=0.9,
+        top_k=50,
+        repetition_penalty=1.1,
         pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
     )
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    # Post-process: cut at stop sequences
+    for stop_str in stop_strings:
+        if stop_str in generated_text:
+            idx = generated_text.find(stop_str)
+            # Keep the prompt part, cut at stop sequence
+            if idx > len(prompt):
+                generated_text = generated_text[:idx].rstrip()
+
+    return generated_text
 
 
 @app.post("/generate/base", response_model=GenerateResponse)

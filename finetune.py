@@ -29,8 +29,8 @@ def load_code_files(data_dir: str, extensions: list[str] = None) -> list[str]:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
                 if content.strip():
-                    # Add file path as context
-                    texts.append(f"# File: {file_path}\n{content}")
+                    # Just use the code content without file path prefix
+                    texts.append(content)
         except Exception as e:
             print(f"Error reading {file_path}: {e}")
 
