@@ -64,52 +64,34 @@ def get_file_content(file_path: str) -> tuple[str, list[str]]:
     return file_path, []
 
 
-def extract_code_block(lines: list[str], line_number: int) -> tuple[int, int, str]:
-    """Extract the entire function/block containing the error line.
+def extract_code_block(lines: list[str], line_number: int, context_before: int = 5, context_after: int = 10) -> tuple[int, int, str]:
+    """Extract code around the error line with context.
     Returns (start_line, end_line, block_code).
+
+    Gets the error line plus surrounding context for better understanding.
     """
     if not lines or line_number < 1 or line_number > len(lines):
         return 0, 0, ""
 
     idx = line_number - 1  # 0-indexed
 
-    # Find block start (look for function/class definition)
-    start_idx = idx
-    for i in range(idx, -1, -1):
+    # Get context: 5 lines before, error line, 10 lines after
+    start_idx = max(0, idx - context_before)
+    end_idx = min(len(lines) - 1, idx + context_after)
+
+    # Try to extend start to include function/class definition if nearby
+    for i in range(idx, max(start_idx - 1, -1), -1):
         line = lines[i].strip()
         if (line.startswith("def ") or line.startswith("async def ") or
             line.startswith("function ") or line.startswith("async function ") or
             line.startswith("class ") or
             "=> {" in line or ") {" in line or
-            line.startswith("const ") and "=" in line and ("=>" in line or "function" in line)):
+            (line.startswith("const ") and "=" in line and ("=>" in line or "function" in line))):
             start_idx = i
             break
         if ":" in line and ("function" in lines[i] or "=>" in lines[i]):
             start_idx = i
             break
-
-    # Find block end (track braces/indentation)
-    end_idx = idx
-    if lines[start_idx].rstrip().endswith("{"):
-        # Brace-based language (JS/TS/Java/C)
-        brace_count = 0
-        for i in range(start_idx, len(lines)):
-            brace_count += lines[i].count("{") - lines[i].count("}")
-            end_idx = i
-            if brace_count <= 0 and i > start_idx:
-                break
-    else:
-        # Indentation-based (Python)
-        base_indent = len(lines[start_idx]) - len(lines[start_idx].lstrip())
-        for i in range(start_idx + 1, len(lines)):
-            line = lines[i]
-            if line.strip() == "":
-                continue
-            current_indent = len(line) - len(line.lstrip())
-            if current_indent <= base_indent and line.strip():
-                end_idx = i - 1
-                break
-            end_idx = i
 
     # Build code block with line numbers, mark error line
     code_lines = []
@@ -120,12 +102,23 @@ def extract_code_block(lines: list[str], line_number: int) -> tuple[int, int, st
     return start_idx + 1, end_idx + 1, "\n".join(code_lines)
 
 
-def get_error_line(file_path: str, line_number: int) -> str:
-    """Get a single line from a file."""
+def get_error_line(file_path: str, line_number: int, with_context: bool = False) -> str:
+    """Get a single line from a file, optionally with context."""
     _, lines = get_file_content(file_path)
-    if lines and 0 < line_number <= len(lines):
+    if not lines or line_number < 1 or line_number > len(lines):
+        return ""
+
+    if not with_context:
         return lines[line_number - 1]
-    return ""
+
+    # Return error line + 3 lines after for preview
+    idx = line_number - 1
+    end_idx = min(len(lines), idx + 4)
+    context_lines = []
+    for i in range(idx, end_idx):
+        marker = ">>> " if i == idx else "    "
+        context_lines.append(f"{marker}{i+1}: {lines[i]}")
+    return "\n".join(context_lines)
 
 
 # ============== App Setup ==============
@@ -309,13 +302,13 @@ Analysis:
             if error_line:
                 possible_code_fix = f"Error line: {error_line}"
 
-        # Build locations for UI
+        # Build locations for UI (with code context)
         locations = [
             {
                 "file": loc.file_path,
                 "line": loc.line_number,
                 "column": loc.column,
-                "code": loc.code_snippet or get_error_line(loc.file_path, loc.line_number),
+                "code": loc.code_snippet or get_error_line(loc.file_path, loc.line_number, with_context=True),
             }
             for loc in parsed.locations
         ]
