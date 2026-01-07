@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -108,7 +109,6 @@ async def lifespan(app: FastAPI):
     )
 
     # Load fine-tuned adapter if exists
-    import os
     if os.path.exists(adapter_path):
         print("Loading fine-tuned model...")
         finetuned_base = AutoModelForCausalLM.from_pretrained(
@@ -277,61 +277,92 @@ async def analyze_test_errors(request: AnalyzeErrorsRequest):
         if parsed.state != "failed":
             continue
 
-        # Format error info for AI
-        error_info = error_parser.format_for_ai(parsed)
+        # Step 1: Collect ALL relevant code from error locations
+        code_context = []
+        files_involved = []
 
-        # Build context from RAG if enabled
-        context = ""
-        relevant_code = ""
-        if request.use_rag and parsed.locations:
-            # Get related files from codebase
-            search_terms = parsed.error_message + " " + " ".join(
-                loc.file_path for loc in parsed.locations[:2]
-            )
+        for loc in parsed.locations:
+            file_code = get_file_code_around_line(loc.file_path, loc.line_number)
+            if file_code:
+                code_context.append(file_code)
+                files_involved.append(loc.file_path)
+
+        # Step 2: Also search codebase for related files if RAG enabled
+        if request.use_rag:
+            # Search by error message and file names
+            search_terms = parsed.error_message
+            for loc in parsed.locations[:2]:
+                search_terms += " " + os.path.basename(loc.file_path)
+
             relevant = codebase.search(search_terms, limit=2)
-
             for r in relevant:
-                content_preview = r["content"][:600]
-                context += f"\n{r['filename']}:\n{content_preview}\n"
-                relevant_code = content_preview  # Keep for code fix reference
+                if r["filename"] not in files_involved:
+                    code_context.append(f"Related file {r['filename']}:\n{r['content'][:500]}")
 
-        # Build location info
+        # Step 3: Build comprehensive context for AI
+        full_context = f"""Test Failed: {parsed.title}
+Error Message: {parsed.error_message}
+
+Files involved in the error:
+{'=' * 40}
+"""
+        for ctx in code_context:
+            full_context += f"\n{ctx}\n"
+
+        full_context += f"""
+{'=' * 40}
+Full stack trace:
+{parsed.full_error[:800] if parsed.full_error else 'N/A'}
+"""
+
+        # Step 4: Generate analysis with ONE comprehensive prompt
+        analysis_prompt = f"""{full_context}
+
+Based on the code above, analyze this error:
+
+1. ROOT CAUSE (why did this happen):
+"""
+        root_cause = generate(analysis_prompt, 150, request.use_finetuned)
+
+        # Generate fix steps
+        fix_prompt = f"""{full_context}
+
+Error: {parsed.error_message}
+
+Steps to fix this error (numbered):
+1."""
+        suggested_fix = "1." + generate(fix_prompt, 200, request.use_finetuned)
+
+        # Generate code fix
+        error_line_code = ""
+        if parsed.locations and parsed.locations[0].code_snippet:
+            error_line_code = parsed.locations[0].code_snippet
+        elif parsed.locations:
+            error_line_code = get_error_line(parsed.locations[0].file_path, parsed.locations[0].line_number)
+
+        if error_line_code:
+            code_fix_prompt = f"""Error: {parsed.error_message}
+
+This line has an error:
+{error_line_code}
+
+The fixed code should be:
+```"""
+            code_fix_raw = generate(code_fix_prompt, 150, request.use_finetuned)
+            possible_code_fix = "```" + code_fix_raw.split("```")[0] + "```" if code_fix_raw else ""
+        else:
+            possible_code_fix = "Could not extract error line for fix suggestion"
+
+        # Build location info for response
         locations = [
             {
                 "file": loc.file_path,
                 "line": loc.line_number,
                 "column": loc.column,
-                "code": loc.code_snippet,
+                "code": loc.code_snippet or get_error_line(loc.file_path, loc.line_number),
             }
             for loc in parsed.locations
         ]
-
-        # Generate rootCause
-        root_cause_prompt = f"""Error: {parsed.error_message}
-Location: {locations[0]['file'] if locations else 'unknown'}:{locations[0]['line'] if locations else '?'}
-
-Why did this error happen (one sentence):"""
-        root_cause = generate(root_cause_prompt, 100, request.use_finetuned)
-
-        # Generate suggestedFix (bullet points)
-        fix_prompt = f"""Error: {parsed.error_message}
-{context}
-
-Steps to fix (numbered list):
-1."""
-        suggested_fix = "1." + generate(fix_prompt, 200, request.use_finetuned)
-
-        # Generate possibleCodeFix
-        code_context = locations[0]['code'] if locations and locations[0].get('code') else relevant_code
-        code_fix_prompt = f"""Error: {parsed.error_message}
-
-Broken code:
-{code_context[:300] if code_context else 'N/A'}
-
-Fixed code:
-```"""
-        code_fix_raw = generate(code_fix_prompt, 200, request.use_finetuned)
-        possible_code_fix = "```" + code_fix_raw.split("```")[0] + "```" if code_fix_raw else ""
 
         results.append(ErrorAnalysis(
             title=parsed.title,
@@ -349,11 +380,80 @@ Fixed code:
     )
 
 
+def get_file_code_around_line(file_path: str, line_number: int, context: int = 10) -> str:
+    """Get code from a file around a specific line."""
+    # Try to find file in codebase index first
+    for filename, data in codebase.files.items():
+        if filename.endswith(file_path) or file_path.endswith(filename) or os.path.basename(file_path) == filename:
+            lines = data["content"].split("\n")
+            start = max(0, line_number - context - 1)
+            end = min(len(lines), line_number + context)
+
+            code_lines = []
+            for i in range(start, end):
+                marker = "→ " if i == line_number - 1 else "  "
+                code_lines.append(f"{marker}{i+1}: {lines[i]}")
+
+            return f"File: {filename} (around line {line_number})\n" + "\n".join(code_lines)
+
+    # Try to read from disk
+    paths_to_try = [
+        file_path,
+        os.path.join("./data", file_path),
+        os.path.join("./data", os.path.basename(file_path)),
+    ]
+
+    for path in paths_to_try:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+
+                start = max(0, line_number - context - 1)
+                end = min(len(lines), line_number + context)
+
+                code_lines = []
+                for i in range(start, end):
+                    marker = "→ " if i == line_number - 1 else "  "
+                    code_lines.append(f"{marker}{i+1}: {lines[i].rstrip()}")
+
+                return f"File: {path} (around line {line_number})\n" + "\n".join(code_lines)
+            except:
+                pass
+
+    return ""
+
+
+def get_error_line(file_path: str, line_number: int) -> str:
+    """Get a single line from a file."""
+    for filename, data in codebase.files.items():
+        if filename.endswith(file_path) or file_path.endswith(filename) or os.path.basename(file_path) == filename:
+            lines = data["content"].split("\n")
+            if 0 < line_number <= len(lines):
+                return lines[line_number - 1]
+
+    paths_to_try = [
+        file_path,
+        os.path.join("./data", file_path),
+        os.path.join("./data", os.path.basename(file_path)),
+    ]
+
+    for path in paths_to_try:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                if 0 < line_number <= len(lines):
+                    return lines[line_number - 1].rstrip()
+            except:
+                pass
+
+    return ""
+
+
 @app.post("/analyze-json-file")
 async def analyze_json_file(file_path: str = "./json_result.json", use_rag: bool = True, use_finetuned: bool = True):
     """Analyze errors from a JSON file path."""
-    import os
-
     if not os.path.exists(file_path):
         return {"error": f"File not found: {file_path}"}
 
