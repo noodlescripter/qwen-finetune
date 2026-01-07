@@ -277,81 +277,74 @@ async def analyze_test_errors(request: AnalyzeErrorsRequest):
         if parsed.state != "failed":
             continue
 
-        # Step 1: Collect ALL relevant code from error locations
-        code_context = []
-        files_involved = []
+        # Step 1: Extract FULL code blocks from error locations
+        code_blocks = []
+        primary_block = ""
+        primary_file = ""
 
         for loc in parsed.locations:
-            file_code = get_file_code_around_line(loc.file_path, loc.line_number)
-            if file_code:
-                code_context.append(file_code)
-                files_involved.append(loc.file_path)
+            filename, lines = get_file_content(loc.file_path)
+            if lines:
+                start, end, block = extract_code_block(lines, loc.line_number)
+                if block:
+                    code_blocks.append({
+                        "file": filename,
+                        "start": start,
+                        "end": end,
+                        "code": block
+                    })
+                    if not primary_block:
+                        primary_block = block
+                        primary_file = filename
 
-        # Step 2: Also search codebase for related files if RAG enabled
-        if request.use_rag:
-            # Search by error message and file names
-            search_terms = parsed.error_message
-            for loc in parsed.locations[:2]:
-                search_terms += " " + os.path.basename(loc.file_path)
+        # Step 2: Build focused context with actual code
+        code_section = ""
+        for block in code_blocks[:3]:  # Limit to 3 blocks
+            code_section += f"\n[{block['file']} lines {block['start']}-{block['end']}]\n{block['code']}\n"
 
-            relevant = codebase.search(search_terms, limit=2)
-            for r in relevant:
-                if r["filename"] not in files_involved:
-                    code_context.append(f"Related file {r['filename']}:\n{r['content'][:500]}")
+        if not code_section:
+            code_section = "Could not extract code from files"
 
-        # Step 3: Build comprehensive context for AI
-        full_context = f"""Test Failed: {parsed.title}
-Error Message: {parsed.error_message}
+        # Step 3: Generate ROOT CAUSE - specific to this code
+        root_cause_prompt = f"""Error in test "{parsed.title}": {parsed.error_message}
 
-Files involved in the error:
-{'=' * 40}
-"""
-        for ctx in code_context:
-            full_context += f"\n{ctx}\n"
+Code where error occurred:
+{code_section}
 
-        full_context += f"""
-{'=' * 40}
-Full stack trace:
-{parsed.full_error[:800] if parsed.full_error else 'N/A'}
-"""
+The root cause of this error is:"""
 
-        # Step 4: Generate analysis with ONE comprehensive prompt
-        analysis_prompt = f"""{full_context}
+        root_cause = generate(root_cause_prompt, 100, request.use_finetuned)
 
-Based on the code above, analyze this error:
+        # Step 4: Generate SUGGESTED FIX - specific steps for this code
+        fix_prompt = f"""Error: {parsed.error_message}
 
-1. ROOT CAUSE (why did this happen):
-"""
-        root_cause = generate(analysis_prompt, 150, request.use_finetuned)
+Code:
+{primary_block if primary_block else code_section}
 
-        # Generate fix steps
-        fix_prompt = f"""{full_context}
+To fix this error:
+1."""
+
+        suggested_fix = "1." + generate(fix_prompt, 150, request.use_finetuned)
+
+        # Step 5: Generate CODE FIX - actual corrected code
+        if primary_block:
+            # Extract just the error line for focused fix
+            error_line = get_error_line(parsed.locations[0].file_path, parsed.locations[0].line_number) if parsed.locations else ""
+
+            code_fix_prompt = f"""Fix this code error.
 
 Error: {parsed.error_message}
+File: {primary_file}
 
-Steps to fix this error (numbered):
-1."""
-        suggested_fix = "1." + generate(fix_prompt, 200, request.use_finetuned)
+Original code:
+{primary_block}
 
-        # Generate code fix
-        error_line_code = ""
-        if parsed.locations and parsed.locations[0].code_snippet:
-            error_line_code = parsed.locations[0].code_snippet
-        elif parsed.locations:
-            error_line_code = get_error_line(parsed.locations[0].file_path, parsed.locations[0].line_number)
+Corrected code:"""
 
-        if error_line_code:
-            code_fix_prompt = f"""Error: {parsed.error_message}
-
-This line has an error:
-{error_line_code}
-
-The fixed code should be:
-```"""
-            code_fix_raw = generate(code_fix_prompt, 150, request.use_finetuned)
-            possible_code_fix = "```" + code_fix_raw.split("```")[0] + "```" if code_fix_raw else ""
+            code_fix_raw = generate(code_fix_prompt, 200, request.use_finetuned)
+            possible_code_fix = code_fix_raw.strip()
         else:
-            possible_code_fix = "Could not extract error line for fix suggestion"
+            possible_code_fix = "Could not extract code block for fix"
 
         # Build location info for response
         locations = [
@@ -368,8 +361,8 @@ The fixed code should be:
             title=parsed.title,
             error_message=parsed.error_message,
             locations=locations,
-            suggestedFix=suggested_fix.strip(),
             rootCause=root_cause.strip(),
+            suggestedFix=suggested_fix.strip(),
             possibleCodeFix=possible_code_fix.strip()
         ))
 
@@ -380,23 +373,14 @@ The fixed code should be:
     )
 
 
-def get_file_code_around_line(file_path: str, line_number: int, context: int = 10) -> str:
-    """Get code from a file around a specific line."""
-    # Try to find file in codebase index first
+def get_file_content(file_path: str) -> tuple[str, list[str]]:
+    """Get full file content and lines. Returns (filename, lines)."""
+    # Try codebase index first
     for filename, data in codebase.files.items():
         if filename.endswith(file_path) or file_path.endswith(filename) or os.path.basename(file_path) == filename:
-            lines = data["content"].split("\n")
-            start = max(0, line_number - context - 1)
-            end = min(len(lines), line_number + context)
+            return filename, data["content"].split("\n")
 
-            code_lines = []
-            for i in range(start, end):
-                marker = "→ " if i == line_number - 1 else "  "
-                code_lines.append(f"{marker}{i+1}: {lines[i]}")
-
-            return f"File: {filename} (around line {line_number})\n" + "\n".join(code_lines)
-
-    # Try to read from disk
+    # Try disk
     paths_to_try = [
         file_path,
         os.path.join("./data", file_path),
@@ -407,47 +391,75 @@ def get_file_code_around_line(file_path: str, line_number: int, context: int = 1
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-
-                start = max(0, line_number - context - 1)
-                end = min(len(lines), line_number + context)
-
-                code_lines = []
-                for i in range(start, end):
-                    marker = "→ " if i == line_number - 1 else "  "
-                    code_lines.append(f"{marker}{i+1}: {lines[i].rstrip()}")
-
-                return f"File: {path} (around line {line_number})\n" + "\n".join(code_lines)
+                    return path, [l.rstrip() for l in f.readlines()]
             except:
                 pass
 
-    return ""
+    return file_path, []
+
+
+def extract_code_block(lines: list[str], line_number: int) -> tuple[int, int, str]:
+    """Extract the entire function/block containing the error line.
+    Returns (start_line, end_line, block_code)."""
+    if not lines or line_number < 1 or line_number > len(lines):
+        return 0, 0, ""
+
+    idx = line_number - 1  # 0-indexed
+
+    # Find block start (look for function/class definition)
+    start_idx = idx
+    for i in range(idx, -1, -1):
+        line = lines[i].strip()
+        # Check for function/class/method definitions
+        if (line.startswith("def ") or line.startswith("async def ") or
+            line.startswith("function ") or line.startswith("async function ") or
+            line.startswith("class ") or
+            "=> {" in line or ") {" in line or
+            line.startswith("const ") and "=" in line and ("=>" in line or "function" in line)):
+            start_idx = i
+            break
+        # Check for method in object/class
+        if ":" in line and ("function" in lines[i] or "=>" in lines[i]):
+            start_idx = i
+            break
+
+    # Find block end (track braces/indentation)
+    end_idx = idx
+    if lines[start_idx].rstrip().endswith("{"):
+        # Brace-based language (JS/TS/Java/C)
+        brace_count = 0
+        for i in range(start_idx, len(lines)):
+            brace_count += lines[i].count("{") - lines[i].count("}")
+            end_idx = i
+            if brace_count <= 0 and i > start_idx:
+                break
+    else:
+        # Indentation-based (Python)
+        base_indent = len(lines[start_idx]) - len(lines[start_idx].lstrip())
+        for i in range(start_idx + 1, len(lines)):
+            line = lines[i]
+            if line.strip() == "":
+                continue
+            current_indent = len(line) - len(line.lstrip())
+            if current_indent <= base_indent and line.strip():
+                end_idx = i - 1
+                break
+            end_idx = i
+
+    # Build code block with line numbers
+    code_lines = []
+    for i in range(start_idx, min(end_idx + 1, len(lines))):
+        marker = ">>> " if i == idx else "    "
+        code_lines.append(f"{marker}{i+1}: {lines[i]}")
+
+    return start_idx + 1, end_idx + 1, "\n".join(code_lines)
 
 
 def get_error_line(file_path: str, line_number: int) -> str:
     """Get a single line from a file."""
-    for filename, data in codebase.files.items():
-        if filename.endswith(file_path) or file_path.endswith(filename) or os.path.basename(file_path) == filename:
-            lines = data["content"].split("\n")
-            if 0 < line_number <= len(lines):
-                return lines[line_number - 1]
-
-    paths_to_try = [
-        file_path,
-        os.path.join("./data", file_path),
-        os.path.join("./data", os.path.basename(file_path)),
-    ]
-
-    for path in paths_to_try:
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-                if 0 < line_number <= len(lines):
-                    return lines[line_number - 1].rstrip()
-            except:
-                pass
-
+    _, lines = get_file_content(file_path)
+    if lines and 0 < line_number <= len(lines):
+        return lines[line_number - 1]
     return ""
 
 
