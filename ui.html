@@ -190,16 +190,17 @@
         <!-- Errors Panel -->
         <div id="errors-panel" class="panel">
             <div class="section">
-                <label>Paste JSON test results or load from file:</label>
-                <textarea id="json-input" placeholder='[
-  {
-    "title": "test case name",
-    "state": "failed",
-    "error": "error message",
-    "fullError": "stack trace with file.js:10:5"
-  }
-]' style="height: 150px;"></textarea>
-                <p class="hint">JSON array with test results containing fullError or complete_error with file:line:column</p>
+                <label>Paste test errors (JSON or raw text):</label>
+                <textarea id="json-input" placeholder='JSON format:
+[{"title": "test name", "state": "failed", "error": "msg", "fullError": "stack trace"}]
+
+OR raw text format:
+FAIL e2e/auth.spec.ts
+✕ should login successfully
+
+Error: Expected element to be visible
+    at e2e/auth.spec.ts:25:10' style="height: 150px;"></textarea>
+                <p class="hint">Supports both JSON array and raw console output with stack traces</p>
             </div>
             <div class="section" style="padding: 10px 15px;">
                 <label style="display: flex; align-items: center; gap: 10px; margin: 0 0 8px 0; cursor: pointer;">
@@ -321,31 +322,42 @@
         }
 
         async function analyzeErrors() {
-            const jsonInput = document.getElementById('json-input').value;
+            const input = document.getElementById('json-input').value;
             const useRag = document.getElementById('errors-use-rag').checked;
             const useFinetuned = document.getElementById('errors-use-finetuned').checked;
             const output = document.getElementById('errors-output');
 
-            if (!jsonInput.trim()) {
-                return alert('Please paste JSON test results');
+            if (!input.trim()) {
+                return alert('Please paste test errors (JSON or raw text)');
             }
 
-            let errors;
-            try {
-                errors = JSON.parse(jsonInput);
-                if (!Array.isArray(errors)) errors = [errors];
-            } catch (e) {
-                return alert('Invalid JSON: ' + e.message);
+            // Detect if input is JSON or raw text
+            let requestBody;
+            const trimmed = input.trim();
+            if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+                // Try to parse as JSON
+                try {
+                    let errors = JSON.parse(trimmed);
+                    if (!Array.isArray(errors)) errors = [errors];
+                    requestBody = { errors, use_rag: useRag, use_finetuned: useFinetuned };
+                } catch (e) {
+                    // JSON parse failed, treat as raw text
+                    requestBody = { raw_text: input, use_rag: useRag, use_finetuned: useFinetuned };
+                }
+            } else {
+                // Raw text format
+                requestBody = { raw_text: input, use_rag: useRag, use_finetuned: useFinetuned };
             }
 
             const modelType = useFinetuned ? 'fine-tuned' : 'base';
-            output.innerHTML = `<div class="loading"><div class="spinner"></div>Analyzing with ${modelType} model...</div>`;
+            const inputType = requestBody.raw_text ? 'raw text' : 'JSON';
+            output.innerHTML = `<div class="loading"><div class="spinner"></div>Analyzing ${inputType} with ${modelType} model...</div>`;
 
             try {
                 const res = await fetch(`${API}/analyze-errors`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ errors, use_rag: useRag, use_finetuned: useFinetuned })
+                    body: JSON.stringify(requestBody)
                 });
                 const data = await res.json();
 
