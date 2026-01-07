@@ -12,17 +12,17 @@ from error_parser import ErrorParser, ParsedError
 # Request/Response models
 class AskRequest(BaseModel):
     question: str
-    max_new_tokens: int = 200
-    use_rag: bool = True  # Set False to use only trained knowledge
-    use_finetuned: bool = True  # Set False to use base model
+    max_new_tokens: int = 300
+    use_rag: bool = True
+    use_finetuned: bool = True
 
 
 class FixCodeRequest(BaseModel):
     code: str
     error: str = ""
-    max_new_tokens: int = 200
-    use_rag: bool = True  # Set False to use only trained knowledge
-    use_finetuned: bool = True  # Set False to use base model
+    max_new_tokens: int = 300
+    use_rag: bool = True
+    use_finetuned: bool = True
 
 
 class AskResponse(BaseModel):
@@ -55,7 +55,7 @@ class AnalyzeErrorsRequest(BaseModel):
     errors: list[TestError]
     use_rag: bool = True
     use_finetuned: bool = True
-    max_new_tokens: int = 300
+    max_new_tokens: int = 500
 
 
 class ErrorAnalysis(BaseModel):
@@ -159,7 +159,6 @@ def generate(prompt: str, max_new_tokens: int, use_finetuned: bool = True) -> st
         do_sample=True,
         temperature=0.3,
         top_p=0.9,
-        top_k=30,
         repetition_penalty=1.2,
         pad_token_id=tokenizer.eos_token_id,
     )
@@ -170,8 +169,8 @@ def generate(prompt: str, max_new_tokens: int, use_finetuned: bool = True) -> st
     if prompt in response:
         response = response[len(prompt):].strip()
 
-    # Clean up
-    stop_patterns = ["\n\n\n", "Question:", "Code:", "# ---"]
+    # Stop at obvious repetition patterns
+    stop_patterns = ["\n\n\n", "<|", "Question:", "Answer:"]
     for pattern in stop_patterns:
         if pattern in response:
             response = response[:response.find(pattern)].strip()
@@ -220,7 +219,7 @@ async def fix_code(request: FixCodeRequest):
     """Get fix suggestion for broken code."""
 
     relevant_files = []
-    error_part = f"\nError: {request.error}" if request.error else ""
+    error_info = f"\nError: {request.error}" if request.error else ""
 
     if request.use_rag:
         # RAG mode: Search for similar code patterns
@@ -230,38 +229,22 @@ async def fix_code(request: FixCodeRequest):
 
         context = ""
         for r in relevant:
-            content_preview = r["content"][:1000]
-            context += f"\n### {r['filename']} (reference)\n```\n{content_preview}\n```\n"
+            context += f"\n{r['filename']}:\n{r['content'][:600]}\n"
 
-        prompt = f"""Reference code from codebase:
+        prompt = f"""Reference code:
 {context}
 
-Broken code:
-```
+Code to fix:{error_info}
 {request.code}
-```{error_part}
 
-Fixed code:
-```
-"""
+Suggestion:"""
     else:
-        # Trained knowledge mode
-        prompt = f"""You are a code assistant trained on a specific codebase.
-Fix this code using the coding patterns and conventions you learned.
-
-Broken code:
-```
+        prompt = f"""Code to fix:{error_info}
 {request.code}
-```{error_part}
 
-Fixed code:
-```
-"""
+Suggestion:"""
 
     suggestion = generate(prompt, request.max_new_tokens, request.use_finetuned)
-
-    # Clean up code block markers
-    suggestion = suggestion.replace("```", "").strip()
 
     return FixCodeResponse(suggestion=suggestion, relevant_files=relevant_files)
 

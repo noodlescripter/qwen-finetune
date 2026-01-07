@@ -1,14 +1,16 @@
-# Qwen Code Model - Fine-tuning & API
+# Qwen Code Assistant
 
-A toolkit for fine-tuning the Qwen2.5-Coder-0.5B model on your custom codebase and serving it via a FastAPI endpoint.
+A complete toolkit for fine-tuning Qwen2.5-Coder-0.5B on your custom codebase with RAG support, error analysis, and a web UI.
 
 ## Features
 
-- Fine-tune Qwen2.5-Coder on your own code using QLoRA (4-bit quantization)
-- Low VRAM support (~3-4GB GPU memory)
-- Resume training to incrementally add new data
-- REST API with endpoints for both base and fine-tuned models
-- Side-by-side model comparison
+- **Instruction-tuning** with chat format for better Q&A results
+- **RAG (Retrieval Augmented Generation)** for accurate codebase knowledge
+- **QLoRA fine-tuning** with 4-bit quantization (3-4GB VRAM)
+- **Error analysis** from JSON test results
+- **Web UI** for easy interaction
+- **Incremental training** with dataset merging
+- **Base vs Fine-tuned** model selection
 
 ## Requirements
 
@@ -23,181 +25,276 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### 1. Prepare Training Data
-
-Add your code files to the `data/` directory:
+### 1. Prepare Your Codebase
 
 ```bash
 mkdir -p data
 cp -r /path/to/your/codebase/* data/
 ```
 
-Supported file extensions: `.py`, `.js`, `.ts`, `.java`, `.cpp`, `.c`, `.go`, `.rs`, `.rb`
+Supported: `.py`, `.js`, `.ts`, `.java`, `.cpp`, `.c`, `.go`, `.rs`, `.rb`
 
-### 2. Fine-tune the Model
-
-```bash
-python finetune.py
-```
-
-### 3. Test the Model
+### 2. Generate Instruction Dataset
 
 ```bash
-python test_model.py
+python generate_dataset.py --data-dir ./data --output ./training_data.jsonl
 ```
 
-### 4. Start the API Server
+This creates Q&A pairs, code completions, and fix examples from your code.
+
+### 3. Fine-tune the Model
+
+```bash
+python finetune_chat.py --dataset ./training_data.jsonl --epochs 3
+```
+
+### 4. Start the API & UI
 
 ```bash
 uvicorn api:app --host 0.0.0.0 --port 8000
+# Open ui.html in browser
 ```
 
-## Usage
+## Training
 
-### Fine-tuning Options
+### Dataset Generation
+
+Generate instruction-tuning dataset from your code:
 
 ```bash
-python finetune.py [OPTIONS]
+python generate_dataset.py [OPTIONS]
 
 Options:
-  --resume          Resume training from existing checkpoint
-  --data-dir        Training data directory (default: ./data)
-  --output-dir      Output directory (default: ./qwen-finetuned)
-  --epochs          Number of training epochs (default: 3)
-  --batch-size      Batch size (default: 1)
-  --learning-rate   Learning rate (default: 2e-4)
-  --max-length      Max sequence length (default: 256)
+  --data-dir    Directory with code files (default: ./data)
+  --output      Output file (default: ./training_data.jsonl)
 ```
 
-**Examples:**
-
-```bash
-# Fresh training
-python finetune.py
-
-# Resume with new data
-python finetune.py --resume
-
-# Custom settings
-python finetune.py --epochs 5 --learning-rate 1e-4
-
-# Resume with lower learning rate (recommended)
-python finetune.py --resume --learning-rate 1e-4 --epochs 2
-```
-
-### API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/generate/base` | Generate using base Qwen model |
-| POST | `/generate/finetuned` | Generate using fine-tuned model |
-| POST | `/compare` | Compare outputs from both models |
-| GET | `/health` | Health check |
-| GET | `/docs` | Swagger UI documentation |
-
-**Request Body:**
-
+**Generated dataset format:**
 ```json
 {
-  "prompt": "def hello_world():",
-  "max_new_tokens": 100
+  "messages": [
+    {"role": "system", "content": "You are a code assistant..."},
+    {"role": "user", "content": "What does AuthService do?"},
+    {"role": "assistant", "content": "The AuthService class..."}
+  ]
 }
 ```
 
-**Example Requests:**
+**Types of training data generated:**
+
+| Type | Example | Purpose |
+|------|---------|---------|
+| Q&A | "What does logger.js do?" | Explain files/functions |
+| Completion | "Complete this code..." | Code autocomplete |
+| Fix | "Review this code..." | Bug fixing |
+
+### Fine-tuning Options
+
+**Chat format (recommended):**
+```bash
+python finetune_chat.py [OPTIONS]
+
+Options:
+  --dataset       Training data file (default: ./training_data.jsonl)
+  --output-dir    Output directory (default: ./qwen-finetuned)
+  --resume        Resume from existing checkpoint
+  --epochs        Number of epochs (default: 3)
+  --batch-size    Batch size (default: 1)
+  --learning-rate Learning rate (default: 2e-4)
+  --max-length    Max sequence length (default: 512)
+```
+
+**Raw code format (simpler):**
+```bash
+python finetune.py [OPTIONS]
+```
+
+### Incremental Training
+
+**Option 1: Add new code → Regenerate → Resume**
+```bash
+# Add new code
+cp -r /path/to/new/code/* data/
+
+# Regenerate dataset (includes all files)
+python generate_dataset.py
+
+# Resume training (keeps old knowledge)
+python finetune_chat.py --resume --learning-rate 1e-4
+```
+
+**Option 2: Merge separate datasets**
+```bash
+# Generate new dataset separately
+python generate_dataset.py --data-dir ./new_code --output ./new_data.jsonl
+
+# Merge with existing
+python merge_datasets.py add ./new_data.jsonl --to ./training_data.jsonl
+
+# Train on merged data
+python finetune_chat.py --resume
+```
+
+### Dataset Merging
 
 ```bash
-# Base model
-curl -X POST http://localhost:8000/generate/base \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "def calculate_sum(", "max_new_tokens": 100}'
+python merge_datasets.py [COMMAND]
 
-# Fine-tuned model
-curl -X POST http://localhost:8000/generate/finetuned \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "def calculate_sum(", "max_new_tokens": 100}'
+Commands:
+  merge     Combine multiple files
+  add       Add new data to existing dataset
+  from-dir  Create from directory of datasets
+  stats     Show dataset statistics
 
-# Compare both
-curl -X POST http://localhost:8000/compare \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "class Logger:", "max_new_tokens": 100}'
+Examples:
+  # Merge multiple files
+  python merge_datasets.py merge old.jsonl new.jsonl -o combined.jsonl
+
+  # Add new data to existing
+  python merge_datasets.py add new_data.jsonl --to training_data.jsonl
+
+  # Check dataset stats
+  python merge_datasets.py stats training_data.jsonl
 ```
 
-**Python Example:**
+## API Endpoints
 
-```python
-import requests
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/ask` | Ask questions about codebase |
+| POST | `/fix` | Get code fix suggestions |
+| POST | `/analyze-errors` | Analyze JSON test errors |
+| POST | `/analyze-json-file` | Analyze errors from file |
+| GET | `/files` | List indexed files |
+| POST | `/reindex` | Re-index codebase |
+| GET | `/health` | Health check |
+| GET | `/docs` | Swagger UI |
 
-response = requests.post(
-    "http://localhost:8000/generate/finetuned",
-    json={"prompt": "def get_logger(", "max_new_tokens": 100}
-)
-print(response.json()["generated_text"])
+### Request Parameters
+
+All POST endpoints support:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `use_rag` | bool | true | Use RAG (retrieve files) |
+| `use_finetuned` | bool | true | Use fine-tuned model |
+| `max_new_tokens` | int | 200 | Max tokens to generate |
+
+### Examples
+
+**Ask about codebase:**
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What does the AuthService do?", "use_rag": true}'
 ```
+
+**Fix code:**
+```bash
+curl -X POST http://localhost:8000/fix \
+  -H "Content-Type: application/json" \
+  -d '{"code": "def foo()\n  return 1", "error": "SyntaxError"}'
+```
+
+**Analyze test errors:**
+```bash
+curl -X POST http://localhost:8000/analyze-errors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "errors": [{
+      "title": "test login",
+      "state": "failed",
+      "error": "TypeError",
+      "fullError": "at auth.js:10:5"
+    }]
+  }'
+```
+
+**Use base model only (no fine-tuning):**
+```bash
+curl -X POST http://localhost:8000/ask \
+  -d '{"question": "How do I sort an array?", "use_finetuned": false}'
+```
+
+## Web UI
+
+Open `ui.html` in your browser after starting the API.
+
+**Features:**
+
+| Tab | Function |
+|-----|----------|
+| Ask About Code | Q&A about your codebase |
+| Fix Code | Get fix suggestions |
+| Analyze Errors | Parse JSON test results |
+| Browse Files | View indexed files |
+
+**Options on each tab:**
+- ✓ Use RAG - Include actual file contents
+- ✓ Use Fine-tuned - Use your trained model
 
 ## Project Structure
 
 ```
 qwen/
-├── api.py              # FastAPI server with both models
-├── finetune.py         # Fine-tuning script with QLoRA
-├── test_model.py       # Interactive CLI for testing
-├── run_qwen.py         # Simple inference script
-├── requirements.txt    # Dependencies
-├── README.md
-├── data/               # Training data (your code files)
-│   ├── models/
-│   ├── services/
-│   ├── utils/
-│   └── ...
-└── qwen-finetuned/     # Output directory (after training)
-    ├── adapter_config.json
-    ├── adapter_model.safetensors
-    └── ...
+├── api.py                 # FastAPI server
+├── ui.html                # Web interface
+├── generate_dataset.py    # Create instruction dataset
+├── finetune_chat.py       # Fine-tune with chat format
+├── finetune.py            # Fine-tune with raw code
+├── merge_datasets.py      # Merge training datasets
+├── codebase_index.py      # RAG indexing
+├── error_parser.py        # Parse error stack traces
+├── test_model.py          # Interactive testing
+├── requirements.txt
+├── data/                  # Your codebase files
+├── training_data.jsonl    # Generated training data
+└── qwen-finetuned/        # Trained model output
 ```
 
-## Training Tips
+## RAG vs Fine-tuned
 
-### Incremental Training
+| Mode | What it does | Best for |
+|------|--------------|----------|
+| **RAG on** | Retrieves actual files | Specific questions about files |
+| **RAG off** | Uses model memory only | General patterns/style |
+| **Fine-tuned** | Your trained model | Your codebase patterns |
+| **Base** | Original Qwen model | General coding questions |
 
-To add new code to an already fine-tuned model:
+**Recommended combinations:**
 
-1. Add new files to `data/` directory
-2. Run with `--resume` flag:
-   ```bash
-   python finetune.py --resume --learning-rate 1e-4
-   ```
+| Use Case | RAG | Model |
+|----------|-----|-------|
+| "What does auth.js do?" | ✓ | Fine-tuned |
+| "Fix this code from my project" | ✓ | Fine-tuned |
+| "How should I structure a service?" | ✗ | Fine-tuned |
+| "How do I use async/await?" | ✗ | Base |
 
-### Memory Issues
-
-If you encounter CUDA OOM errors:
-
-```bash
-# Set environment variable
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python finetune.py
-
-# Or reduce max length
-python finetune.py --max-length 128
-```
-
-### Recommended Settings by VRAM
+## Memory Settings
 
 | VRAM | batch-size | max-length |
 |------|------------|------------|
-| 3-4 GB | 1 | 128-256 |
-| 6-8 GB | 2 | 256-512 |
-| 12+ GB | 4 | 512-1024 |
+| 3-4 GB | 1 | 256 |
+| 6-8 GB | 2 | 512 |
+| 12+ GB | 4 | 1024 |
+
+**If OOM errors:**
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python finetune_chat.py
+```
 
 ## Dependencies
 
-- `transformers` - Model loading and inference
-- `torch` - PyTorch backend
-- `peft` - Parameter-efficient fine-tuning (LoRA)
-- `bitsandbytes` - 4-bit quantization
-- `accelerate` - Device management
-- `datasets` - Dataset handling
-- `fastapi` - API framework
-- `uvicorn` - ASGI server
+```
+transformers
+torch
+peft
+bitsandbytes
+accelerate
+datasets
+fastapi
+uvicorn
+```
 
 ## License
 
