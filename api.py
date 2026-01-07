@@ -253,7 +253,7 @@ Suggestion:"""
 
 @app.post("/analyze-errors", response_model=AnalyzeErrorsResponse)
 async def analyze_test_errors(request: AnalyzeErrorsRequest):
-    """Analyze test errors and provide fix suggestions."""
+    """Analyze test errors using base model with actual code from codebase."""
 
     results = []
 
@@ -277,76 +277,78 @@ async def analyze_test_errors(request: AnalyzeErrorsRequest):
         if parsed.state != "failed":
             continue
 
-        # Step 1: Extract FULL code blocks from error locations
+        # Step 1: Find and extract code from files in stack trace
         code_blocks = []
-        primary_block = ""
-        primary_file = ""
-
-        for loc in parsed.locations:
+        for loc in parsed.locations[:3]:  # Max 3 locations
             filename, lines = get_file_content(loc.file_path)
             if lines:
                 start, end, block = extract_code_block(lines, loc.line_number)
                 if block:
                     code_blocks.append({
-                        "file": filename,
-                        "start": start,
-                        "end": end,
+                        "file": os.path.basename(filename),
+                        "line": loc.line_number,
                         "code": block
                     })
-                    if not primary_block:
-                        primary_block = block
-                        primary_file = filename
 
-        # Step 2: Build focused context with actual code
-        code_section = ""
-        for block in code_blocks[:3]:  # Limit to 3 blocks
-            code_section += f"\n[{block['file']} lines {block['start']}-{block['end']}]\n{block['code']}\n"
+        # Step 2: Build simple context - just the code and error
+        if code_blocks:
+            code_text = ""
+            for b in code_blocks:
+                code_text += f"\n{b['file']} (error at line {b['line']}):\n{b['code']}\n"
+        else:
+            code_text = "No code found"
 
-        if not code_section:
-            code_section = "Could not extract code from files"
-
-        # Step 3: Generate ROOT CAUSE - specific to this code
-        root_cause_prompt = f"""Error in test "{parsed.title}": {parsed.error_message}
-
-Code where error occurred:
-{code_section}
-
-The root cause of this error is:"""
-
-        root_cause = generate(root_cause_prompt, 100, request.use_finetuned)
-
-        # Step 4: Generate SUGGESTED FIX - specific steps for this code
-        fix_prompt = f"""Error: {parsed.error_message}
-
-Code:
-{primary_block if primary_block else code_section}
-
-To fix this error:
-1."""
-
-        suggested_fix = "1." + generate(fix_prompt, 150, request.use_finetuned)
-
-        # Step 5: Generate CODE FIX - actual corrected code
-        if primary_block:
-            # Extract just the error line for focused fix
-            error_line = get_error_line(parsed.locations[0].file_path, parsed.locations[0].line_number) if parsed.locations else ""
-
-            code_fix_prompt = f"""Fix this code error.
+        # Step 3: ONE simple prompt - let base model reason about code
+        # Using base model (use_finetuned=False) for better general reasoning
+        analysis_prompt = f"""Analyze this code error.
 
 Error: {parsed.error_message}
-File: {primary_file}
 
-Original code:
-{primary_block}
+Code:
+{code_text}
 
-Corrected code:"""
+Analysis:
+1. Root cause:"""
 
-            code_fix_raw = generate(code_fix_prompt, 200, request.use_finetuned)
-            possible_code_fix = code_fix_raw.strip()
-        else:
-            possible_code_fix = "Could not extract code block for fix"
+        # Use BASE model for analysis (better general reasoning)
+        full_response = generate(analysis_prompt, 250, use_finetuned=False)
 
-        # Build location info for response
+        # Parse the response into parts
+        root_cause = ""
+        suggested_fix = ""
+        possible_code_fix = ""
+
+        # Try to extract structured parts from response
+        response_lines = full_response.split("\n")
+        current_section = "root_cause"
+
+        for line in response_lines:
+            line_lower = line.lower().strip()
+            if "fix" in line_lower or "solution" in line_lower or "to fix" in line_lower:
+                current_section = "fix"
+            elif "code" in line_lower and ("correct" in line_lower or "fixed" in line_lower):
+                current_section = "code"
+
+            if current_section == "root_cause":
+                root_cause += line + "\n"
+            elif current_section == "fix":
+                suggested_fix += line + "\n"
+            else:
+                possible_code_fix += line + "\n"
+
+        # If parsing didn't work well, use full response
+        if not root_cause.strip():
+            root_cause = full_response
+        if not suggested_fix.strip():
+            suggested_fix = "See root cause analysis above"
+
+        # Get the actual error line for code fix if we couldn't parse one
+        if not possible_code_fix.strip() and code_blocks:
+            error_line = get_error_line(parsed.locations[0].file_path, parsed.locations[0].line_number)
+            if error_line:
+                possible_code_fix = f"Error line: {error_line}"
+
+        # Build location info
         locations = [
             {
                 "file": loc.file_path,
