@@ -376,7 +376,18 @@
                                 `).join('')}
                             </div>
                         ` : ''}
-                        <div class="output-content">${r.suggestion}</div>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #9d4edd; font-size: 12px; font-weight: 600;">Root Cause:</span>
+                            <div class="output-content" style="min-height: auto; margin-top: 5px;">${r.rootCause || 'Unknown'}</div>
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #00d9ff; font-size: 12px; font-weight: 600;">Suggested Fix:</span>
+                            <div class="output-content" style="min-height: auto; margin-top: 5px;">${r.suggestedFix || 'No suggestion'}</div>
+                        </div>
+                        <div>
+                            <span style="color: #4ade80; font-size: 12px; font-weight: 600;">Possible Code Fix:</span>
+                            <div class="output-content" style="min-height: auto; margin-top: 5px;">${r.possibleCodeFix || 'No code fix available'}</div>
+                        </div>
                     </div>
                 `).join('');
 
@@ -426,7 +437,18 @@
                                 `).join('')}
                             </div>
                         ` : ''}
-                        <div class="output-content">${r.suggestion}</div>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #9d4edd; font-size: 12px; font-weight: 600;">Root Cause:</span>
+                            <div class="output-content" style="min-height: auto; margin-top: 5px;">${r.rootCause || 'Unknown'}</div>
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #00d9ff; font-size: 12px; font-weight: 600;">Suggested Fix:</span>
+                            <div class="output-content" style="min-height: auto; margin-top: 5px;">${r.suggestedFix || 'No suggestion'}</div>
+                        </div>
+                        <div>
+                            <span style="color: #4ade80; font-size: 12px; font-weight: 600;">Possible Code Fix:</span>
+                            <div class="output-content" style="min-height: auto; margin-top: 5px;">${r.possibleCodeFix || 'No code fix available'}</div>
+                        </div>
                     </div>
                 `).join('');
 

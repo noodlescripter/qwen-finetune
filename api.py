@@ -62,7 +62,9 @@ class ErrorAnalysis(BaseModel):
     title: str
     error_message: str
     locations: list[dict]
-    suggestion: str
+    suggestedFix: str  # Bullet points / numbered steps
+    rootCause: str  # Why the error happened
+    possibleCodeFix: str  # Code block with the fix
 
 
 class AnalyzeErrorsResponse(BaseModel):
@@ -280,6 +282,7 @@ async def analyze_test_errors(request: AnalyzeErrorsRequest):
 
         # Build context from RAG if enabled
         context = ""
+        relevant_code = ""
         if request.use_rag and parsed.locations:
             # Get related files from codebase
             search_terms = parsed.error_message + " " + " ".join(
@@ -288,30 +291,9 @@ async def analyze_test_errors(request: AnalyzeErrorsRequest):
             relevant = codebase.search(search_terms, limit=2)
 
             for r in relevant:
-                content_preview = r["content"][:800]
-                context += f"\n### {r['filename']} (reference)\n```\n{content_preview}\n```\n"
-
-        # Build prompt
-        if context:
-            prompt = f"""You are a code assistant. Analyze this test failure and suggest a fix.
-
-Reference code from codebase:
-{context}
-
-Test failure details:
-{error_info}
-
-Provide a concise fix suggestion:"""
-        else:
-            prompt = f"""You are a code assistant. Analyze this test failure and suggest a fix.
-
-Test failure details:
-{error_info}
-
-Provide a concise fix suggestion:"""
-
-        # Generate suggestion
-        suggestion = generate(prompt, request.max_new_tokens, request.use_finetuned)
+                content_preview = r["content"][:600]
+                context += f"\n{r['filename']}:\n{content_preview}\n"
+                relevant_code = content_preview  # Keep for code fix reference
 
         # Build location info
         locations = [
@@ -324,11 +306,40 @@ Provide a concise fix suggestion:"""
             for loc in parsed.locations
         ]
 
+        # Generate rootCause
+        root_cause_prompt = f"""Error: {parsed.error_message}
+Location: {locations[0]['file'] if locations else 'unknown'}:{locations[0]['line'] if locations else '?'}
+
+Why did this error happen (one sentence):"""
+        root_cause = generate(root_cause_prompt, 100, request.use_finetuned)
+
+        # Generate suggestedFix (bullet points)
+        fix_prompt = f"""Error: {parsed.error_message}
+{context}
+
+Steps to fix (numbered list):
+1."""
+        suggested_fix = "1." + generate(fix_prompt, 200, request.use_finetuned)
+
+        # Generate possibleCodeFix
+        code_context = locations[0]['code'] if locations and locations[0].get('code') else relevant_code
+        code_fix_prompt = f"""Error: {parsed.error_message}
+
+Broken code:
+{code_context[:300] if code_context else 'N/A'}
+
+Fixed code:
+```"""
+        code_fix_raw = generate(code_fix_prompt, 200, request.use_finetuned)
+        possible_code_fix = "```" + code_fix_raw.split("```")[0] + "```" if code_fix_raw else ""
+
         results.append(ErrorAnalysis(
             title=parsed.title,
             error_message=parsed.error_message,
             locations=locations,
-            suggestion=suggestion
+            suggestedFix=suggested_fix.strip(),
+            rootCause=root_cause.strip(),
+            possibleCodeFix=possible_code_fix.strip()
         ))
 
     return AnalyzeErrorsResponse(
