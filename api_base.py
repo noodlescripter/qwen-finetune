@@ -9,22 +9,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
+from codebase_index import CodebaseIndex
+from error_parser import ErrorParser
 
-# ============== Models ==============
+
+# ============== Request/Response Models ==============
 
 class ErrorRequest(BaseModel):
-    errors: list[dict]  # [{title, state, error, fullError, complete_error}]
+    errors: list[dict] | None = None  # [{title, state, error, fullError, complete_error}]
+    raw_text: str | None = None  # Raw error text (non-JSON format)
 
 
 class ErrorAnalysis(BaseModel):
     title: str
     error_message: str
-    file: str
-    line: int
-    code_block: str
-    root_cause: str
-    suggested_fix: str
-    code_fix: str
+    locations: list[dict]  # [{file, line, column, code}]
+    rootCause: str
+    suggestedFix: str
+    possibleCodeFix: str
 
 
 class AskRequest(BaseModel):
@@ -36,170 +38,94 @@ class FixRequest(BaseModel):
     error: str = ""
 
 
-# ============== Codebase Index ==============
-
-class CodebaseIndex:
-    """Simple file index for the codebase."""
-
-    EXTENSIONS = ['.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.c', '.cpp', '.h']
-
-    def __init__(self, data_dir: str = "./data"):
-        self.data_dir = data_dir
-        self.files: dict[str, dict] = {}
-
-    def index(self):
-        """Index all code files."""
-        self.files.clear()
-
-        for root, dirs, filenames in os.walk(self.data_dir):
-            # Skip hidden and common ignore dirs
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['node_modules', '__pycache__', 'build', 'dist']]
-
-            for filename in filenames:
-                ext = os.path.splitext(filename)[1].lower()
-                if ext in self.EXTENSIONS:
-                    filepath = os.path.join(root, filename)
-                    try:
-                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                        self.files[filename] = {
-                            'path': filepath,
-                            'content': content,
-                            'lines': content.split('\n')
-                        }
-                    except:
-                        pass
-
-        print(f"Indexed {len(self.files)} files")
-        return len(self.files)
-
-    def find_file(self, name: str) -> dict | None:
-        """Find a file by name (partial match)."""
-        name = os.path.basename(name)
-
-        # Exact match
-        if name in self.files:
-            return self.files[name]
-
-        # Partial match
-        for filename, data in self.files.items():
-            if name in filename or filename in name:
-                return data
-
-        return None
-
-    def get_code_block(self, filename: str, line_number: int) -> tuple[str, str]:
-        """Get the code block (function/class) containing a line.
-        Returns (block_code, full_file_content)."""
-
-        file_data = self.find_file(filename)
-        if not file_data:
-            return "", ""
-
-        lines = file_data['lines']
-        if line_number < 1 or line_number > len(lines):
-            return "", file_data['content']
-
-        idx = line_number - 1
-
-        # Find block start
-        start_idx = idx
-        for i in range(idx, -1, -1):
-            line = lines[i].strip()
-            if (line.startswith('def ') or line.startswith('async def ') or
-                line.startswith('function ') or line.startswith('async function ') or
-                line.startswith('class ') or
-                ('=> {' in line) or (') {' in line and not line.startswith('if') and not line.startswith('for'))):
-                start_idx = i
-                break
-
-        # Find block end
-        end_idx = idx
-        if start_idx < len(lines) and lines[start_idx].rstrip().endswith('{'):
-            brace_count = 0
-            for i in range(start_idx, len(lines)):
-                brace_count += lines[i].count('{') - lines[i].count('}')
-                end_idx = i
-                if brace_count <= 0 and i > start_idx:
-                    break
-        else:
-            # Python indentation
-            if start_idx < len(lines):
-                base_indent = len(lines[start_idx]) - len(lines[start_idx].lstrip())
-                for i in range(start_idx + 1, len(lines)):
-                    if lines[i].strip() == '':
-                        continue
-                    current_indent = len(lines[i]) - len(lines[i].lstrip())
-                    if current_indent <= base_indent and lines[i].strip():
-                        end_idx = i - 1
-                        break
-                    end_idx = i
-
-        # Build block with line numbers, mark error line
-        block_lines = []
-        for i in range(start_idx, min(end_idx + 1, len(lines))):
-            marker = ">>>" if i == idx else "   "
-            block_lines.append(f"{marker} {i+1}: {lines[i]}")
-
-        return '\n'.join(block_lines), file_data['content']
-
-    def search(self, query: str, limit: int = 3) -> list[dict]:
-        """Search files by content."""
-        results = []
-        query_lower = query.lower()
-
-        for filename, data in self.files.items():
-            if query_lower in data['content'].lower():
-                results.append({
-                    'filename': filename,
-                    'content': data['content'][:1000]
-                })
-                if len(results) >= limit:
-                    break
-
-        return results
-
-
-# ============== Error Parser ==============
-
-import re
-
-def parse_stack_trace(error_text: str) -> list[dict]:
-    """Extract file:line locations from error stack trace."""
-    locations = []
-
-    patterns = [
-        r'at\s+(?:[\w.<>]+\s+)?\(?([^\s():]+):(\d+):(\d+)\)?',  # JS: at func (file:10:5)
-        r'File\s+"([^"]+)",\s+line\s+(\d+)',  # Python: File "x.py", line 10
-        r'([^\s:()]+\.[a-zA-Z]{1,4}):(\d+)(?::(\d+))?',  # Generic: file.js:10:5
-    ]
-
-    for pattern in patterns:
-        for match in re.finditer(pattern, error_text):
-            groups = match.groups()
-            locations.append({
-                'file': groups[0],
-                'line': int(groups[1]),
-                'column': int(groups[2]) if len(groups) > 2 and groups[2] else None
-            })
-
-    # Remove duplicates
-    seen = set()
-    unique = []
-    for loc in locations:
-        key = (loc['file'], loc['line'])
-        if key not in seen:
-            seen.add(key)
-            unique.append(loc)
-
-    return unique
-
-
 # ============== Globals ==============
 
 model = None
 tokenizer = None
 codebase = CodebaseIndex()
+error_parser = ErrorParser(base_path="./data")
+
+
+# ============== Helper Functions ==============
+
+def get_file_content(file_path: str) -> tuple[str, list[str]]:
+    """Get file content from codebase index ONLY (no disk access).
+    Returns (filename, lines).
+    """
+    # Search in codebase index only
+    for filename, data in codebase.files.items():
+        # Match by: exact name, path ends with search, or basename matches
+        if (filename == file_path or
+            filename.endswith(file_path) or
+            file_path.endswith(filename) or
+            os.path.basename(file_path) == filename):
+            return filename, data["content"].split("\n")
+
+    return file_path, []
+
+
+def extract_code_block(lines: list[str], line_number: int) -> tuple[int, int, str]:
+    """Extract the entire function/block containing the error line.
+    Returns (start_line, end_line, block_code).
+    """
+    if not lines or line_number < 1 or line_number > len(lines):
+        return 0, 0, ""
+
+    idx = line_number - 1  # 0-indexed
+
+    # Find block start (look for function/class definition)
+    start_idx = idx
+    for i in range(idx, -1, -1):
+        line = lines[i].strip()
+        if (line.startswith("def ") or line.startswith("async def ") or
+            line.startswith("function ") or line.startswith("async function ") or
+            line.startswith("class ") or
+            "=> {" in line or ") {" in line or
+            line.startswith("const ") and "=" in line and ("=>" in line or "function" in line)):
+            start_idx = i
+            break
+        if ":" in line and ("function" in lines[i] or "=>" in lines[i]):
+            start_idx = i
+            break
+
+    # Find block end (track braces/indentation)
+    end_idx = idx
+    if lines[start_idx].rstrip().endswith("{"):
+        # Brace-based language (JS/TS/Java/C)
+        brace_count = 0
+        for i in range(start_idx, len(lines)):
+            brace_count += lines[i].count("{") - lines[i].count("}")
+            end_idx = i
+            if brace_count <= 0 and i > start_idx:
+                break
+    else:
+        # Indentation-based (Python)
+        base_indent = len(lines[start_idx]) - len(lines[start_idx].lstrip())
+        for i in range(start_idx + 1, len(lines)):
+            line = lines[i]
+            if line.strip() == "":
+                continue
+            current_indent = len(line) - len(line.lstrip())
+            if current_indent <= base_indent and line.strip():
+                end_idx = i - 1
+                break
+            end_idx = i
+
+    # Build code block with line numbers, mark error line
+    code_lines = []
+    for i in range(start_idx, min(end_idx + 1, len(lines))):
+        marker = ">>> " if i == idx else "    "
+        code_lines.append(f"{marker}{i+1}: {lines[i]}")
+
+    return start_idx + 1, end_idx + 1, "\n".join(code_lines)
+
+
+def get_error_line(file_path: str, line_number: int) -> str:
+    """Get a single line from a file."""
+    _, lines = get_file_content(file_path)
+    if lines and 0 < line_number <= len(lines):
+        return lines[line_number - 1]
+    return ""
 
 
 # ============== App Setup ==============
@@ -232,8 +158,11 @@ async def lifespan(app: FastAPI):
         device_map="auto",
     )
 
-    print("Indexing codebase...")
-    codebase.index()
+    print("Loading codebase index...")
+    codebase.load_index()
+    if not codebase.files:
+        print("No index found, indexing codebase...")
+        codebase.index_codebase()
 
     print(f"Ready! {model_name} loaded, {len(codebase.files)} files indexed.")
     yield
@@ -288,94 +217,131 @@ async def analyze_errors(request: ErrorRequest):
 
     results = []
 
-    for error in request.errors:
-        if error.get('state') != 'failed':
+    # Parse errors - either from JSON or raw text
+    if request.raw_text:
+        # Parse raw text into error format
+        import re
+        error_match = re.search(r'(?:Error|TypeError|ReferenceError):\s*(.+?)(?:\n|$)', request.raw_text)
+        error_msg = error_match.group(1).strip() if error_match else request.raw_text[:200]
+        error_dicts = [{
+            "title": "Test Failure",
+            "state": "failed",
+            "error": error_msg,
+            "fullError": request.raw_text,
+            "complete_error": request.raw_text
+        }]
+    elif request.errors:
+        error_dicts = request.errors
+    else:
+        return {"results": [], "total": 0, "analyzed": 0}
+
+    # Parse all errors using ErrorParser
+    parsed_errors = error_parser.parse_json_data(error_dicts)
+
+    for parsed in parsed_errors:
+        # Skip passed tests
+        if parsed.state != "failed":
             continue
 
-        title = error.get('title', 'Unknown')
-        error_msg = error.get('error', '')
-        full_error = error.get('fullError', '') or error.get('complete_error', '')
+        # Step 1: Find and extract code from files in stack trace
+        code_blocks = []
+        for loc in parsed.locations[:3]:  # Max 3 locations
+            filename, lines = get_file_content(loc.file_path)
+            if lines:
+                start, end, block = extract_code_block(lines, loc.line_number)
+                if block:
+                    code_blocks.append({
+                        "file": os.path.basename(filename),
+                        "line": loc.line_number,
+                        "code": block
+                    })
 
-        # Parse stack trace to find file locations
-        locations = parse_stack_trace(full_error)
+        # Step 2: Build context - the code and error
+        if code_blocks:
+            code_text = ""
+            for b in code_blocks:
+                code_text += f"\n{b['file']} (error at line {b['line']}):\n{b['code']}\n"
+        else:
+            code_text = "No code found in indexed files"
 
-        if not locations:
-            results.append(ErrorAnalysis(
-                title=title,
-                error_message=error_msg,
-                file="unknown",
-                line=0,
-                code_block="Could not parse file location from error",
-                root_cause="Unable to locate source file",
-                suggested_fix="Check the error message manually",
-                code_fix=""
-            ))
-            continue
+        # Step 3: Generate analysis with base model
+        analysis_prompt = f"""Analyze this code error.
 
-        # Get code from first location
-        loc = locations[0]
-        code_block, _ = codebase.get_code_block(loc['file'], loc['line'])
-
-        if not code_block:
-            code_block = f"File {loc['file']} not found in codebase"
-
-        # Generate root cause
-        root_cause_prompt = f"""Error: {error_msg}
-
-Code ({loc['file']} line {loc['line']}):
-{code_block}
-
-Root cause of this error:"""
-
-        root_cause = generate(root_cause_prompt, 150)
-
-        # Generate suggested fix
-        fix_prompt = f"""Error: {error_msg}
+Error: {parsed.error_message}
 
 Code:
-{code_block}
+{code_text}
 
-Steps to fix:
-1."""
+Analysis:
+1. Root cause:"""
 
-        suggested_fix = "1." + generate(fix_prompt, 150)
+        full_response = generate(analysis_prompt, 250)
 
-        # Generate code fix
-        code_fix_prompt = f"""Error: {error_msg}
+        # Parse response into parts
+        root_cause = ""
+        suggested_fix = ""
+        possible_code_fix = ""
 
-Original code:
-{code_block}
+        response_lines = full_response.split("\n")
+        current_section = "root_cause"
 
-Corrected code:"""
+        for line in response_lines:
+            line_lower = line.lower().strip()
+            if "fix" in line_lower or "solution" in line_lower or "to fix" in line_lower:
+                current_section = "fix"
+            elif "code" in line_lower and ("correct" in line_lower or "fixed" in line_lower):
+                current_section = "code"
 
-        code_fix = generate(code_fix_prompt, 200)
+            if current_section == "root_cause":
+                root_cause += line + "\n"
+            elif current_section == "fix":
+                suggested_fix += line + "\n"
+            else:
+                possible_code_fix += line + "\n"
+
+        # Fallbacks
+        if not root_cause.strip():
+            root_cause = full_response
+        if not suggested_fix.strip():
+            suggested_fix = "See root cause analysis above"
+        if not possible_code_fix.strip() and code_blocks:
+            error_line = get_error_line(parsed.locations[0].file_path, parsed.locations[0].line_number)
+            if error_line:
+                possible_code_fix = f"Error line: {error_line}"
+
+        # Build locations for UI
+        locations = [
+            {
+                "file": loc.file_path,
+                "line": loc.line_number,
+                "column": loc.column,
+                "code": loc.code_snippet or get_error_line(loc.file_path, loc.line_number),
+            }
+            for loc in parsed.locations
+        ]
 
         results.append(ErrorAnalysis(
-            title=title,
-            error_message=error_msg,
-            file=loc['file'],
-            line=loc['line'],
-            code_block=code_block,
-            root_cause=root_cause.strip(),
-            suggested_fix=suggested_fix.strip(),
-            code_fix=code_fix.strip()
+            title=parsed.title,
+            error_message=parsed.error_message,
+            locations=locations,
+            rootCause=root_cause.strip(),
+            suggestedFix=suggested_fix.strip(),
+            possibleCodeFix=possible_code_fix.strip()
         ))
 
-    return {"results": results, "total": len(request.errors), "analyzed": len(results)}
+    return {"results": results, "total": len(error_dicts), "analyzed": len(results)}
 
 
 @app.post("/ask")
 async def ask_question(request: AskRequest):
     """Ask about the codebase."""
 
-    # Search codebase for relevant files
     relevant = codebase.search(request.question, limit=2)
+    relevant_files = [r["filename"] for r in relevant]
 
     context = ""
-    files_used = []
     for r in relevant:
-        context += f"\n{r['filename']}:\n{r['content']}\n"
-        files_used.append(r['filename'])
+        context += f"\n{r['filename']}:\n{r['content'][:1500]}\n"
 
     prompt = f"""Based on this code:
 {context}
@@ -386,7 +352,7 @@ Answer:"""
 
     answer = generate(prompt, 200)
 
-    return {"answer": answer, "files": files_used}
+    return {"answer": answer, "files": relevant_files}
 
 
 @app.post("/fix")
@@ -410,13 +376,13 @@ Fixed code:"""
 @app.get("/files")
 async def list_files():
     """List indexed files."""
-    return [{"filename": f, "lines": len(d['lines'])} for f, d in codebase.files.items()]
+    return [{"filename": f, "lines": len(d['content'].split('\n'))} for f, d in codebase.files.items()]
 
 
 @app.post("/reindex")
 async def reindex():
     """Reindex the codebase."""
-    count = codebase.index()
+    count = codebase.index_codebase()
     return {"indexed": count}
 
 
