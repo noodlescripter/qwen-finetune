@@ -10,3 +10,7 @@ venv/
 .jsonl
 train_data.jsonl
 train_data.json
+data/
+mcp-codebase-server/
+qwen-finetuned/
+vscode-codebase-extension/

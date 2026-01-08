@@ -52,13 +52,22 @@ def get_file_content(file_path: str) -> tuple[str, list[str]]:
     """Get file content from codebase index ONLY (no disk access).
     Returns (filename, lines).
     """
+    # Clean up the file path
+    clean_path = file_path.replace("./data/", "").replace("data/", "")
+    basename = os.path.basename(file_path)
+
     # Search in codebase index only
     for filename, data in codebase.files.items():
-        # Match by: exact name, path ends with search, or basename matches
-        if (filename == file_path or
-            filename.endswith(file_path) or
-            file_path.endswith(filename) or
-            os.path.basename(file_path) == filename):
+        file_rel_path = data.get("path", "")
+
+        # Match by path first (more specific)
+        if (clean_path == file_rel_path or
+            file_rel_path.endswith(clean_path) or
+            clean_path.endswith(file_rel_path)):
+            return filename, data["content"].split("\n")
+
+        # Then by filename
+        if basename == filename:
             return filename, data["content"].split("\n")
 
     return file_path, []
@@ -111,11 +120,12 @@ def get_error_line(file_path: str, line_number: int, with_context: bool = False)
     if not with_context:
         return lines[line_number - 1]
 
-    # Return error line + 3 lines after for preview
+    # Return 3 lines before, error line, and 5 lines after for preview
     idx = line_number - 1
-    end_idx = min(len(lines), idx + 4)
+    start_idx = max(0, idx - 3)
+    end_idx = min(len(lines), idx + 6)
     context_lines = []
-    for i in range(idx, end_idx):
+    for i in range(start_idx, end_idx):
         marker = ">>> " if i == idx else "    "
         context_lines.append(f"{marker}{i+1}: {lines[i]}")
     return "\n".join(context_lines)
@@ -297,21 +307,48 @@ Analysis:
             root_cause = full_response
         if not suggested_fix.strip():
             suggested_fix = "See root cause analysis above"
-        if not possible_code_fix.strip() and code_blocks:
-            error_line = get_error_line(parsed.locations[0].file_path, parsed.locations[0].line_number)
-            if error_line:
-                possible_code_fix = f"Error line: {error_line}"
 
-        # Build locations for UI (with code context)
-        locations = [
-            {
+        # Generate code fix if not found in response
+        if not possible_code_fix.strip() and code_blocks:
+            # Detect language from file extension
+            file_ext = os.path.splitext(code_blocks[0]['file'])[1].lower()
+            lang_map = {
+                '.js': 'JavaScript',
+                '.ts': 'TypeScript',
+                '.tsx': 'TypeScript/React',
+                '.jsx': 'JavaScript/React',
+                '.py': 'Python',
+                '.java': 'Java',
+                '.go': 'Go',
+                '.rs': 'Rust',
+                '.c': 'C',
+                '.cpp': 'C++',
+                '.rb': 'Ruby',
+                '.php': 'PHP',
+            }
+            language = lang_map.get(file_ext, 'JavaScript')
+
+            code_fix_prompt = f"""Fix this {language} code error.
+
+Error: {parsed.error_message}
+
+Broken {language} code:
+{code_blocks[0]['code']}
+
+Fixed {language} code:"""
+            possible_code_fix = generate(code_fix_prompt, 200)
+
+        # Build locations for UI (with code context from our index)
+        locations = []
+        for loc in parsed.locations:
+            # Always get code from our index with context (ignore ErrorParser's code_snippet)
+            code_with_context = get_error_line(loc.file_path, loc.line_number, with_context=True)
+            locations.append({
                 "file": loc.file_path,
                 "line": loc.line_number,
                 "column": loc.column,
-                "code": loc.code_snippet or get_error_line(loc.file_path, loc.line_number, with_context=True),
-            }
-            for loc in parsed.locations
-        ]
+                "code": code_with_context if code_with_context else f"Line {loc.line_number} not found in index",
+            })
 
         results.append(ErrorAnalysis(
             title=parsed.title,
